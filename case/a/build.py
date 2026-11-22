@@ -2,9 +2,10 @@
 
     .venv/bin/python build.py                 # すべての部品
     .venv/bin/python build.py --tilt 48       # 傾斜台だけを別の角度で（left_base_tilt48.stl など）
-    .venv/bin/python build.py --set ball_d=27 --out out/ball27   # 寸法を変えて別の場所へ
+    .venv/bin/python build.py --set ball_d=27 --out ~/omnis-ball27   # 寸法を変えて別の場所へ
 
-書き出した STL は読み直し、閉じた形でなければ止まる。
+書き出した STL は読み直し、閉じた形でなければ止まる。作ったときの寸法は、STL と同じ場所の
+build.json に記録する。check.py、render.py、estimate.py はこの記録を読んで、同じ寸法で動く。
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import trimesh
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from omnis_a import assembly, parts, plate  # noqa: E402
+from omnis_a import assembly, manifest, parts, plate  # noqa: E402
 from omnis_a.layout import Key  # noqa: E402
 from omnis_a.params import DEFAULT, Params  # noqa: E402
 
@@ -79,7 +80,7 @@ def fit_problems(p: Params) -> list[str]:
     for side in assembly.SIDES:
         half = assembly.half(p, side, knurl=False)
         base = half["base"] + half["foot"]
-        inside = half["plate"] + half["switch_lower"]
+        inside = half["plate"] + half["switch_lower"] + half["switch_pins"]
         for extra in ("ball", "wheel"):
             if extra in half:
                 inside += half[extra]
@@ -111,6 +112,7 @@ def main() -> None:
     ap.add_argument("--set", action="append", default=[], metavar="名前=値", help="寸法を上書きする")
     ap.add_argument("--out", type=Path, default=HERE / "stl")
     args = ap.parse_args()
+    args.out = args.out.expanduser()
 
     p = DEFAULT.with_(**parse_overrides(args.set))
     if args.tilt is not None:
@@ -122,17 +124,27 @@ def main() -> None:
     for problem in fit_problems(p):
         raise SystemExit(f"この寸法では部品が当たります: {problem}")
     if args.tilt is not None:
-        tag = f"_tilt{args.tilt:g}".replace(".", "p")
+        tag = manifest.tilt_tag(args.tilt)
         todo = {f"{name}{tag}": m for name, m in base_parts(p).items()}
+        # 載せるプレートは同じ場所のものを使う。別の寸法で作ってあったら、合わないので止まる。
+        for side in assembly.SIDES:
+            entry = manifest.read(args.out).get(f"{side}_plate.stl")
+            if entry is not None and manifest.params_from(entry["params"]).with_(tilt=p.tilt) != p:
+                raise SystemExit(f"{args.out} のプレートは別の寸法（{manifest.describe(manifest.params_from(entry['params']))}）"
+                                 "で作られています。同じ --set を付けるか、--out で別の場所へ出してください。")
     else:
         todo = all_parts(p)
 
-    print(f"傾き {p.tilt:g}°、内側の壁の寝かせ {p.lean:g}°")
+    print(f"傾き {p.tilt:g}°、内側の壁の寝かせ {p.lean:g}°、寸法は{manifest.describe(p)}")
     for name, m in todo.items():
         back = write_stl(m, args.out / f"{name}.stl")
         size = back.bounds[1] - back.bounds[0]
         print(f"  {name}.stl  {size[0]:.1f} × {size[1]:.1f} × {size[2]:.1f} mm  "
               f"{back.volume / 1000:.1f} cm³  閉じた形")
+    manifest.record(args.out, {f"{name}.stl": p for name in todo})
+    print(f"寸法の記録: {args.out / manifest.NAME}")
+    if args.tilt is not None:
+        print(f"確かめるには: check.py --stl {args.out} --tilt {args.tilt:g}")
 
 
 if __name__ == "__main__":

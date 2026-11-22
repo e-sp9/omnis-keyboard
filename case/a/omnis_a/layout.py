@@ -17,6 +17,7 @@ from . import geom
 from .params import Params
 
 EDGE_MIN = 1.0   # 抜き穴と、プレートの差し込み部の側面の間に残す肉
+VOICE_EDGE = 1.4  # 音声入力キーの穴では、板が薄いぶん多めに残す
 
 
 @dataclass(frozen=True)
@@ -256,8 +257,7 @@ def _common(p: Params):
     voice = _voice_key(p, alphas)
     front_ball = min(v_b - ball_hole_radius(p, w) - EDGE_MIN - side_offset(p, w) for w in _levels(p))
     front_ball = min(front_ball, v_b - r_hole - p.ball_ring - 0.3 - p.chamfer_top)
-    voice_open = p.hole / 2.0 + (p.plate_t - p.voice_sink - p.land)   # 下面での開口の半分
-    front_voice = voice.v - voice_open - EDGE_MIN - _plug_inset(p)
+    front_voice = voice.v - p.hole / 2.0 - VOICE_EDGE - _plug_inset(p)
     v_front = math.floor(min(front_ball, front_voice) * 10.0) / 10.0
     return alphas, u_out, u_in, v_front, v_back, (u_b, v_b), r_hole, voice
 
@@ -290,7 +290,7 @@ def make_layout(p: Params, side: str) -> Layout:
 
     if side == "left":
         # ホイールの窓。内側の縁に寄せ、奥行きは右の球の中心に合わせる。
-        win_len = p.wheel_len + 2 * p.wheel_gap
+        win_len = p.wheel_len + 2 * (p.wheel_pad + p.wheel_play)
         win_dep = p.wheel_d + 1.0
         axle_low = wheel_axis_w(p) - p.axle_d / 2.0 - 0.2
         u1 = inner_limit(p, u_in, axle_low) - 0.8 - CRADLE

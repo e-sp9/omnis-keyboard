@@ -28,8 +28,11 @@ def base_world(p: Params, side: str) -> Manifold:
     return shell.base(p, layout(p, side))
 
 
-def half(p: Params, side: str, press: float = 0.0, knurl: bool = True) -> dict[str, Manifold]:
-    """片手ぶんの部品（机の座標、内側が +x）。"""
+def half(p: Params, side: str, press: float = 0.0, knurl: bool = True, tall: float = 0.0) -> dict[str, Manifold]:
+    """片手ぶんの部品（机の座標、内側が +x）。
+
+    press はキーの押し込み量、tall はスイッチの上のハウジングの高さに足す量（公差の端を見るとき）。
+    """
     lay = layout(p, side)
 
     def world(m: Manifold) -> Manifold:
@@ -41,8 +44,8 @@ def half(p: Params, side: str, press: float = 0.0, knurl: bool = True) -> dict[s
     out["base"] = upper
     out["foot"] = lower
 
-    caps = voice = sw_up = sw_low = stems = None
-    sw_u, sw_l = parts.switch(p)
+    caps = voice = sw_up = sw_low = sw_pins = stems = None
+    sw_u, sw_l, sw_p = parts.switch(p, tall)
     stem = parts.stem(p, press)
     for key in lay.keys:
         cap = parts.place_on_key(p, key, parts.keycap(p, key), press)
@@ -52,8 +55,10 @@ def half(p: Params, side: str, press: float = 0.0, knurl: bool = True) -> dict[s
             caps = cap if caps is None else caps + cap
         a, b = parts.place_on_key(p, key, sw_u), parts.place_on_key(p, key, sw_l)
         c = parts.place_on_key(p, key, stem)
+        d = parts.place_on_key(p, key, sw_p)
         sw_up = a if sw_up is None else sw_up + a
         sw_low = b if sw_low is None else sw_low + b
+        sw_pins = d if sw_pins is None else sw_pins + d
         stems = c if stems is None else stems + c
     out["caps"] = world(caps)
     if voice is not None:
@@ -64,7 +69,8 @@ def half(p: Params, side: str, press: float = 0.0, knurl: bool = True) -> dict[s
         hole = parts.place_on_key(p, key, parts.stem(p).translate((0, 0, -3.0)))
         bore = hole if bore is None else bore + hole
     out["switch_upper"] = world(sw_up - bore)
-    out["switch_lower"] = world(sw_low)
+    out["switch_lower"] = world(sw_low)      # 下のハウジングと中央の柱
+    out["switch_pins"] = world(sw_pins)      # 電気の端子
     out["stems"] = world(stems)
     if lay.wheel is not None:
         out["wheel"] = world(parts.wheel_in_place(p, lay, knurl))

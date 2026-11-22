@@ -2,9 +2,11 @@
 
     .venv/bin/python estimate.py             # stl/ の部品をすべて
     .venv/bin/python estimate.py base        # 名前に base を含む部品だけ
+    .venv/bin/python estimate.py --tilt 48   # 傾斜台を left_base_tilt48.stl などに替えて
 
 スライスするだけで、プリンターには何も送らない。BambuStudio の設定フォルダは読むだけにし、
-CLI が書くものは out/estimate/ の中に閉じ込める（--datadir）。
+CLI が書くもの（3MF、設定の写し、ログ）は使い捨ての置き場の中に閉じ込める（--datadir）。
+置き場は環境変数 OMNIS_SCRATCH、なければ ~/.cache/omnis-case-a。リポジトリの中には書かない。
 BambuStudio が入っていない環境では「見積もりなし」と出して終わる。
 """
 
@@ -19,6 +21,10 @@ import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+from omnis_a import manifest, workdir  # noqa: E402
+
 APP = Path("/Applications/BambuStudio.app/Contents/MacOS/BambuStudio")
 PRESETS = Path.home() / "Library/Application Support/BambuStudio/system/BBL"
 
@@ -80,9 +86,14 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("only", nargs="?", default="", help="名前にこの文字を含む部品だけ")
     ap.add_argument("--stl", type=Path, default=HERE / "stl")
-    ap.add_argument("--work", type=Path, default=HERE / "out" / "estimate")
-    ap.add_argument("--json", type=Path, default=HERE / "out" / "estimate.json")
+    ap.add_argument("--tilt", type=float, help="この傾きで出した傾斜台（left_base_tilt48.stl など）を見積もる")
+    ap.add_argument("--work", type=Path, help="CLI が書くものの置き場（既定は使い捨ての置き場の estimate/）")
+    ap.add_argument("--json", type=Path, help="結果を書くファイル（既定は使い捨ての置き場の estimate.json）")
     args = ap.parse_args()
+    args.stl = args.stl.expanduser()
+    tag = manifest.tilt_tag(args.tilt) if args.tilt is not None else ""
+    args.work = args.work or workdir.scratch("estimate")
+    args.json = args.json or workdir.scratch(f"estimate{tag}.json")
 
     if not APP.exists() or not PRESETS.exists():
         print("見積もりなし（BambuStudio か、そのプリセットが見つからない）")
@@ -102,6 +113,8 @@ def main() -> None:
     print("| --- | --- | --- | --- | --- |")
     results, seconds, grams = {}, 0, 0.0
     for name in PARTS:
+        if name.endswith("_base"):
+            name += tag
         if args.only and args.only not in name:
             continue
         r = slice_stl(args.stl / f"{name}.stl", args.work, settings)
@@ -115,9 +128,11 @@ def main() -> None:
         print(f"| `{name}.stl` | {clock(r['seconds'])} | {r['grams']:.1f} | {r['meters']:.2f} | {support} |")
     print(f"| 合計 | {clock(seconds)} | {grams:.1f} | | |")
     if not args.only:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps({"bambustudio": version, "machine": MACHINE, "process": PROCESS,
                                          "filament": FILAMENT, "parts": results},
                                         ensure_ascii=False, indent=1) + "\n")
+        print(f"\n結果を書いた場所: {args.json}")
 
 
 if __name__ == "__main__":

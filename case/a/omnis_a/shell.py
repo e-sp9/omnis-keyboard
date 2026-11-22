@@ -27,7 +27,7 @@ SIDE_ORDER = ("front", "cheek", "back", "diag", "outer")   # 上から見て反�
 def outer_height(p: Params) -> float:
     """外側の端で、上面の縁が机から上がる高さ。左右で同じ値にする。
 
-    h_outer を基本にし、傾きを小さくしてスイッチの端子やプレートの下の角が底の枠に
+    h_outer を基本にし、傾きを小さくしてスイッチの柱やプレートの下の角が底に
     近づくときは、そのぶん持ち上げる。
     """
     th = math.radians(p.tilt)
@@ -164,13 +164,28 @@ def plug_solid(p: Params, lay: Layout, shrink: float = 0.0) -> Manifold:
 
 # ---- 机の座標での外形 -----------------------------------------------------------
 
+def _skirt(wall: Plane, floor: Plane, c: float) -> Plane:
+    """壁と底の稜を落とす面。ふつうは、両方の面で稜から c のところを通る。
+
+    傾きを基準より大きくすると、外側の壁は上へ行くほど外へ倒れ、この面は 45° より寝る。
+    そのときは、底で稜から c のところを通る 45° の面にする（支えなしで印刷できる角度に収める）。
+    """
+    plane = geom.chamfer(wall, floor, c)
+    if -plane.n[2] <= math.sin(math.radians(45.0)) + 1e-9:
+        return plane
+    flat = geom.unit((wall.n[0], wall.n[1], 0.0))        # 壁の向きの、水平な成分
+    z = -floor.d
+    reach = (wall.d - wall.n[2] * z) / float(wall.n @ flat)   # 底の高さで、壁の面までの距離
+    return Plane.through(flat + np.array([0.0, 0.0, -1.0]), (reach - c) * flat + np.array([0.0, 0.0, z]))
+
+
 def _world_planes(p: Params, lay: Layout):
     rot, trans = frame(p, lay)
     ext = exterior(p, lay)
     walls = [pl.moved(rot, trans) for pl in ext.walls]
     tops = [pl.moved(rot, trans) for pl in (ext.top,) + ext.top_chamfers]
     floor = Plane((0.0, 0.0, -1.0), -p.foot_h)          # z >= foot_h
-    skirts = [geom.chamfer(pl, floor, p.foot_inset) for pl in walls]
+    skirts = [_skirt(pl, floor, p.foot_inset) for pl in walls]
     return walls, tops, floor, skirts
 
 
@@ -197,31 +212,61 @@ def cavity(p: Params, lay: Layout) -> Manifold:
     return geom.convex(inner)
 
 
-def floor_opening(p: Params, lay: Layout) -> Manifold:
-    """底の枠の内側を抜く形。"""
-    hole = geom.grow(foot_outline(p, lay), -p.floor_w)
-    return geom.prism(hole, -1.0, p.foot_h + 1.0)
+CABLE_SHOULDER = 2.5   # ケーブルの窓の上の角を 45° で落とす量
 
 
-def cable_notch(p: Params, lay: Layout) -> Manifold:
-    """奥の壁の下の切り欠き。配線したあとにケーブルを外へ出す。"""
+def cable_window(p: Params, lay: Layout) -> Manifold:
+    """奥の壁の窓。配線したあとのケーブルを外へ出す。底は閉じているので、開口はここだけ。
+
+    下端は、底の上面から cable_sill だけ上（足のまわりの 45° の面取りより上）。上の角は
+    45° で落とし、残る平らな天井を支えなしで渡せる幅にする。
+    """
     x_in = world_point(p, lay, (lay.u_in, 0.0, p.top))[0]
     xc = x_in - 16.0
-    half, height = 6.5, 6.0
-    y0, y1 = lay.v_back - p.floor_w - 4.0, lay.v_back + 2.0
+    half, c = p.cable_w / 2.0, CABLE_SHOULDER
+    z0 = p.foot_h + p.cable_sill
+    z1 = z0 + p.cable_h
+    y0, y1 = lay.v_back - p.wall - 3.0, lay.v_back + 2.0
     pts = []
     for y in (y0, y1):
-        pts += [(xc - half, y, -1.0), (xc + half, y, -1.0),
-                (xc + half, y, height - 2.5), (xc + half - 2.5, y, height),
-                (xc - half + 2.5, y, height), (xc - half, y, height - 2.5)]
+        pts += [(xc - half, y, z0), (xc + half, y, z0),
+                (xc + half, y, z1 - c), (xc + half - c, y, z1),
+                (xc - half + c, y, z1), (xc - half, y, z1 - c)]
     return Manifold.hull_points(np.asarray(pts, dtype=float))
 
 
+def pad_centres(p: Params, lay: Layout) -> list[np.ndarray]:
+    """ゴム足を貼る位置（机の座標の x, y）。足の四隅で、ゴム足の縁が足の縁から pad_edge 内側。
+
+    順に、外側の手前、内側の手前、内側の奥、外側の奥。倒れにくさを決めるのは内側の 2 枚。
+    """
+    reach = geom.grow(foot_outline(p, lay), -(p.pad_d / 2.0 + p.pad_edge))
+    pts = geom.polygons(reach)[0]
+    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    out = []
+    for corner in ((lo[0], lo[1]), (hi[0], lo[1]), (hi[0], hi[1]), (lo[0], hi[1])):
+        d = np.linalg.norm(pts - np.asarray(corner), axis=1)
+        out.append(pts[int(d.argmin())])
+    return out
+
+
+def pad_marks(p: Params, lay: Layout) -> Manifold:
+    """ゴム足を貼る位置の目印。底に浅い輪の溝を彫る（輪の内側に貼る）。足の縁には肉を残す。"""
+    keep = geom.grow(foot_outline(p, lay), -p.pad_edge)
+    r0 = p.pad_d / 2.0 + 0.2
+    marks = None
+    for c in pad_centres(p, lay):
+        ring = CrossSection.circle(r0 + p.pad_mark_w, 64) - CrossSection.circle(r0, 64)
+        ring = ring.translate((float(c[0]), float(c[1]))) ^ keep
+        marks = ring if marks is None else marks + ring
+    return geom.prism(marks, -1.0, p.pad_mark_depth)
+
+
 def base(p: Params, lay: Layout) -> Manifold:
-    """傾斜台（机の座標。印刷する向きも同じ）。"""
+    """傾斜台（机の座標。印刷する向きも同じ）。底は足と同じ厚みの板で閉じている。"""
     shell = body(p, lay) + foot(p, lay)
     shell -= cavity(p, lay)
-    shell -= floor_opening(p, lay)
     shell -= to_world(p, lay, seat_solid(p, lay))
-    shell -= cable_notch(p, lay)
+    shell -= cable_window(p, lay)
+    shell -= pad_marks(p, lay)
     return shell

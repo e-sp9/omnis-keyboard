@@ -10,7 +10,13 @@
     layout   プレートを平らに置いて真上から
     parts    印刷する部品を、印刷する向きのまま並べた図
 
-形は STL を読むのではなく、build.py と同じ関数から直接作る。
+    .venv/bin/python render.py --tilt 48            # 傾斜台を left_base_tilt48.stl などに替えた形
+    .venv/bin/python render.py --stl ~/omnis-ball27  # 別の場所に出した一式
+
+形は STL を読むのではなく、build.py と同じ関数から直接作る。寸法は既定値ではなく、STL と同じ
+場所の build.json（build.py が書く、作ったときの寸法の記録）から読む。stl/ の一式は preview/ に、
+それ以外は使い捨ての置き場（環境変数 OMNIS_SCRATCH、なければ ~/.cache/omnis-case-a）に出す。
+描画用の一時ファイルも使い捨ての置き場に書く。
 """
 
 from __future__ import annotations
@@ -29,11 +35,11 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import build  # noqa: E402
-from omnis_a import assembly, geom, parts  # noqa: E402
-from omnis_a.params import DEFAULT, Params  # noqa: E402
+from omnis_a import assembly, geom, manifest, parts, workdir  # noqa: E402
+from omnis_a.params import Params  # noqa: E402
 
 PREVIEW = HERE / "preview"
-CACHE = HERE / "out" / "render"
+CACHE = workdir.scratch("render")
 REFERENCE = HERE / "reference" / "chamfer-inner-wheel.jpg"
 
 # REFERENCE_VIEW は、同じプレートを 20° の傾斜台に載せた形を参考画像に重ねて合わせたカメラ。
@@ -64,7 +70,7 @@ MATERIALS = {
 GROUP_MATERIAL = {
     "plate": "case", "base": "case", "foot": "foot", "caps": "caps", "voice_cap": "voice",
     "ball": "ball", "wheel": "wheel", "axle": "wheel", "switch_upper": "switch",
-    "switch_lower": "switch", "stems": "switch",
+    "switch_lower": "switch", "switch_pins": "switch", "stems": "switch",
 }
 
 
@@ -270,7 +276,7 @@ def _flat_plate(p: Params, side: str) -> list[tuple[str, str, object]]:
     lift = (0.0, 0.0, p.plate_t)
     items = [("plate", "case", assembly.plate_deck(p, side).translate(lift))]
     caps = housings = None
-    upper, _lower = parts.switch(p)
+    upper = parts.switch(p)[0]
     for key in lay.keys:
         cap = parts.place_on_key(p, key, parts.keycap(p, key)).translate(lift)
         if key.kind == "voice":
@@ -352,14 +358,21 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("views", nargs="*", metavar="図", help=" ".join(VIEWS))
     ap.add_argument("--spp", type=int, help="1画素あたりの試行回数（粗く速く見たいときに小さくする）")
-    ap.add_argument("--out", type=Path, default=PREVIEW)
+    ap.add_argument("--stl", type=Path, default=HERE / "stl", help="STL と build.json のある場所")
+    ap.add_argument("--tilt", type=float, help="この傾きで出した傾斜台（left_base_tilt48.stl など）の形で描く")
+    ap.add_argument("--out", type=Path, help="画像の出し先")
     args = ap.parse_args()
     wanted = args.views or list(VIEWS)
     unknown = [v for v in wanted if v not in VIEWS]
     if unknown:
         ap.error(f"知らない図です: {' '.join(unknown)}")
+    stl = args.stl.expanduser().resolve()
+    _p_plate, p, _files = manifest.load_set(stl, args.tilt)
+    if args.out is None:
+        tag = manifest.tilt_tag(args.tilt) if args.tilt is not None else ""
+        args.out = PREVIEW if (stl == HERE / "stl" and not tag) else workdir.scratch("preview", stl.name + tag)
     args.out.mkdir(parents=True, exist_ok=True)
-    p = DEFAULT
+    print(f"寸法は {stl / manifest.NAME} の記録から：{manifest.describe(p)}。出し先は {args.out}")
     reference = Image.open(REFERENCE).convert("RGB")
 
     def save(img: Image.Image, name: str) -> None:

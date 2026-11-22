@@ -1,8 +1,8 @@
 """プレート。キー面の座標で作る。印刷する向きも同じ（下面を造形面に置く）。
 
 上から、見えている上面（w = bezel）、キーキャップが入るくぼみ、スイッチが載る面（w = 0）、
-下面（w = -plate_t）。スイッチ穴のふちは land の厚みで、その下を 45° で広げてある。
-こうすると、下に支えのない張り出しを作らずに、穴の間を深いリブにできる。
+下面（w = -plate_t）。スイッチ穴のふちは厚み clip_t の平らな板で、Choc V2 の爪はこの板の
+下面に掛かる。板の下は穴の間を深いリブにし、爪が開く所だけを外へ広げてある（爪の逃げ）。
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ from .geom import EPS
 from .layout import CRADLE, Key, Layout
 from .params import Params
 
+MIN_WALL = 0.8   # 爪の逃げと差し込み部の側面の間に、これだけの肉が残らないなら外へ抜く
+
 
 def blank(p: Params, lay: Layout) -> Manifold:
     """穴をあける前のプレート。外形のうち、合わせ目より上と差し込み部。"""
@@ -29,12 +31,30 @@ def switch_hole(p: Params, key: Key) -> Manifold:
     return geom.prism(key.square(p.hole), p.bottom - 1.0, -key.sink + EPS)
 
 
-def switch_flare(p: Params, key: Key) -> Manifold:
-    """スイッチ穴のふちの下を 45° で広げる部分。"""
-    flare = min(p.flare, p.plate_t - key.sink - p.land)
-    w_land = -key.sink - p.land
-    return parts.flare_cut(key.square(p.hole), key.square(p.hole + 2 * flare),
-                           p.bottom - 1.0, w_land - flare, w_land)
+def open_sides(p: Params, key: Key, plug: Manifold) -> tuple[int, ...]:
+    """爪の逃げのうち、差し込み部の側面に近すぎて薄い壁しか残らない辺。
+
+    内側の壁は寝ているので、内側の列では差し込み部の側面が穴のすぐ脇まで来る。そこに
+    薄い壁を残すと印刷が乱れるので、その辺の逃げは側面まで抜いてしまう。抜けた先は
+    傾斜台の壁の内側で、外からは見えない。
+    """
+    z_ledge = -key.sink - parts.ledge(p, key)
+    if z_ledge - p.bottom < 0.05:
+        return ()
+    h = p.hole / 2.0
+    out = []
+    for i in range(4):
+        probe = geom.box(h, h + p.clip_d + MIN_WALL, -p.clip_w / 2.0, p.clip_w / 2.0, p.bottom, z_ledge)
+        probe = geom.move(probe, geom.rot_z(90.0 * i + key.rot), np.array([key.u, key.v, 0.0]))
+        if (probe - plug).volume() > 1e-6:
+            out.append(i)
+    return tuple(out)
+
+
+def clip_reliefs(p: Params, key: Key, plug: Manifold) -> Manifold | None:
+    """そのキーの爪の逃げ（板が薄くて要らないときは None）。"""
+    z_ledge = -key.sink - parts.ledge(p, key)
+    return parts.clip_relief(p, key, p.bottom - 1.0, z_ledge, open_sides(p, key, plug))
 
 
 def wheel_axle_span(p: Params, lay: Layout) -> tuple[float, float]:
@@ -42,24 +62,48 @@ def wheel_axle_span(p: Params, lay: Layout) -> tuple[float, float]:
     return u0 - CRADLE, u1 + CRADLE
 
 
-def wheel_cut(p: Params, lay: Layout) -> Manifold:
-    """ホイールの窓と、軸を上から落とし込む溝。"""
+def wheel_window(p: Params, lay: Layout, shrink: float = 0.0) -> Manifold:
+    """ホイールの窓。shrink を渡すと、軸の向きの両端をそのぶん内へ寄せた形になる。
+
+    内側の端は、ホイールの面取りより下を 45° で引っ込める（寝ている内側の壁との間に肉を残す）。
+    """
     u0, u1, v0, v1 = lay.wheel
-    vc = (v0 + v1) / 2.0
-    w_axis = lay_mod.wheel_axis_w(p)
+    u0, u1 = u0 + shrink, u1 - shrink
     w_flat = lay_mod.wheel_flat_w(p)
     low, high = p.bottom - 1.0, p.top + 5.0
     pts = []
     for v in (v0, v1):
         pts += [(u0, v, low), (u0, v, high), (u1, v, high), (u1, v, w_flat),
                 (u1 - (w_flat - low), v, low)]
-    window = Manifold.hull_points(np.asarray(pts, dtype=float))
+    return Manifold.hull_points(np.asarray(pts, dtype=float))
+
+
+def wheel_axle_cut(p: Params, lay: Layout) -> Manifold:
+    """軸を上から落とし込む溝。窓の両端から CRADLE だけ先まで伸びる。"""
+    _u0, _u1, v0, v1 = lay.wheel
+    vc = (v0 + v1) / 2.0
+    w_axis = lay_mod.wheel_axis_w(p)
     slot_w = p.axle_d + 0.25
     a0, a1 = wheel_axle_span(p, lay)
-    slot = geom.box(a0, a1, vc - slot_w / 2.0, vc + slot_w / 2.0, w_axis, high)
+    slot = geom.box(a0, a1, vc - slot_w / 2.0, vc + slot_w / 2.0, w_axis, p.top + 5.0)
     trough = Manifold.cylinder(a1 - a0, slot_w / 2.0, slot_w / 2.0, 48)
     trough = geom.move(trough, geom.rot_y(90.0), np.array([a0, vc, w_axis]))
-    return window + slot + trough
+    return slot + trough
+
+
+def wheel_pads(p: Params, lay: Layout) -> Manifold:
+    """窓の両端の壁で、軸の下だけを wheel_pad だけ窓の中へ出した当たり。
+
+    キー面と一緒に軸も傾くので、ホイールは低い側へ寄る。寄ったホイールの端面は、軸に近い
+    この当たりに触れて止まり、窓の壁には届かない。下面から立ち上がる形なので、支えなしで
+    印刷できる。壁の中へも少し食い込ませて、壁とひと続きにする。
+    """
+    _u0, _u1, v0, v1 = lay.wheel
+    vc = (v0 + v1) / 2.0
+    u_lo, u_hi = wheel_axle_span(p, lay)
+    top = lay_mod.wheel_axis_w(p) - 0.3      # 軸受けの溝の底と面をそろえないよう、軸の少し下で止める
+    strip = geom.box(u_lo, u_hi, vc - p.wheel_pad_r, vc + p.wheel_pad_r, p.bottom, top)
+    return (strip ^ wheel_window(p, lay, shrink=-0.3)) - wheel_window(p, lay, shrink=p.wheel_pad)
 
 
 def lip(p: Params, lay: Layout) -> Manifold:
@@ -109,33 +153,31 @@ def ball_nubs(p: Params, lay: Layout) -> Manifold:
     return nubs ^ keep
 
 
-PLUG_SKIN = 1.0   # 差し込み部の側面に必ず残す肉
-
-
 def plate(p: Params, lay: Layout) -> Manifold:
     """プレート（キー面の座標）。"""
     through = geom.prism(lay_mod.wells(p, lay), 0.0, p.top + 5.0)
     vw = lay_mod.voice_well(p, lay)
     if vw is not None:
         through += geom.prism(vw, -p.voice_sink, p.top + 5.0)
-    flares = None
+    plug = shell.plug_solid(p, lay)
     for key in lay.keys:
         through += switch_hole(p, key)
-        fl = switch_flare(p, key)
-        flares = fl if flares is None else flares + fl
+        relief = clip_reliefs(p, key, plug)
+        if relief is not None:
+            through += relief
     if lay.wheel is not None:
-        through += wheel_cut(p, lay)
+        through += wheel_window(p, lay) + wheel_axle_cut(p, lay)
     else:
         through += ball_cut(p, lay)
 
     m = blank(p, lay)
     if lay.lip is not None:
         m += lip(p, lay)
-    m -= flares
-    # 穴のふちを広げても、差し込み部の側面には薄い壁を残す。
-    m += shell.plug_solid(p, lay) - shell.plug_solid(p, lay, shrink=PLUG_SKIN)
     m -= through
-    if lay.wheel is None:
+    if lay.wheel is not None:
+        m += wheel_pads(p, lay)
+        m -= wheel_axle_cut(p, lay)
+    else:
         m += ball_nubs(p, lay)
     return m
 

@@ -1,0 +1,44 @@
+{
+ "files": {
+  "fit_test.stl": {
+   "params": {},
+   "sha256": "313e511165654df0c2ee0f54b83ab48cd73f548e2e0346f6fe847b074f03604b"
+  },
+  "keycap_1u.stl": {
+   "params": {},
+   "sha256": "5f4affa81c3b31ea4bb4bfaeceecca94d31518ab4af5b757240aa408b9f5be29"
+  },
+  "keycap_enter.stl": {
+   "params": {},
+   "sha256": "99edc30c5aa40ca1dc1aa15346e7e81dac3c0185b1ed4e2b616f2242624a7f82"
+  },
+  "keycap_space.stl": {
+   "params": {},
+   "sha256": "9ed33ff2bd6e793e4c4d1bec5d4bad27860030297c93c78d95b3e12aad3132e1"
+  },
+  "keycap_voice.stl": {
+   "params": {},
+   "sha256": "73b72ca69b7ca6b2fa12196595642f462a233009d8e4371a7acbbc93a2e775b6"
+  },
+  "left_base.stl": {
+   "params": {},
+   "sha256": "17a25742e152d6831bab47a929c9725d5281f78cf4aa29af92b2df76ccf9c32d"
+  },
+  "left_plate.stl": {
+   "params": {},
+   "sha256": "8b2cb9da0b5f773f0683ce017e2ef2984a9c4da7b38059fe77b32fc1c18e6320"
+  },
+  "left_wheel.stl": {
+   "params": {},
+   "sha256": "7de39eb83829a5156cefec774a29271a3bf0bcf6a7630303b6f1863bb9073b0e"
+  },
+  "right_base.stl": {
+   "params": {},
+   "sha256": "e6629fda56af18dec87e8f689eebd360af7f17777f015b17ece49517ec6db15f"
+  },
+  "right_plate.stl": {
+   "params": {},
+   "sha256": "2ba2cf5a0b1a4bdfeed862eff51cbc3d195e5e36e545ff18a3f1765de8f1533e"
+  }
+ }
+}
