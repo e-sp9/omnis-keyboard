@@ -6,7 +6,7 @@ from functools import lru_cache
 
 from manifold3d import Manifold
 
-from . import layout as lay_mod, parts, plate as plate_mod, shell
+from . import geom, layout as lay_mod, parts, plate as plate_mod, shell
 from .layout import Layout
 from .params import Params
 
@@ -34,6 +34,7 @@ def half(p: Params, side: str, press: float = 0.0, knurl: bool = True, tall: flo
 
     press はキーの押し込み量、tall はスイッチの上のハウジングの高さに足す量（公差の端を見るとき）。
     look を渡すと、キーキャップをプレビュー用の丸みのある形にする（検査には使わない）。
+    スイッチの脚（switch_pins、switch_leg）は、挿せる 4 つの向きを重ねた形で返す。
     """
     lay = layout(p, side)
 
@@ -42,12 +43,16 @@ def half(p: Params, side: str, press: float = 0.0, knurl: bool = True, tall: flo
 
     out: dict[str, Manifold] = {"plate": world(plate_deck(p, side))}
     base = base_world(p, side)
-    upper, lower = base.split_by_plane((0.0, 0.0, 1.0), p.floor_top)     # 底の板から下が、黒くする台
+    upper, lower = base.split_by_plane((0.0, 0.0, 1.0), p.foot_h)     # 壁の下端から下が、黒くする台
     out["base"] = upper
     out["foot"] = lower
 
-    caps = voice = sw_up = sw_low = sw_pins = stems = None
-    sw_u, sw_l, sw_p = parts.switch(p, tall)
+    caps = voice = sw_up = sw_low = sw_pins = sw_leg = stems = None
+    sw_u, sw_l = parts.switch(p, tall)
+    # 脚は、挿せる 4 つの向きを重ねた形にする。どの向きに挿しても当たらないことを確かめるため
+    mirror = side == "right"
+    sw_p = geom.union_all(parts.legs(p, q, mirror)[0] for q in parts.QUARTERS)
+    sw_g = geom.union_all(parts.legs(p, q, mirror)[1] for q in parts.QUARTERS)
     stem = parts.stem(p, press)
     for key in lay.keys:
         cap = parts.place_on_key(p, key, parts.keycap_look(p, key) if look else parts.keycap(p, key), press)
@@ -57,10 +62,11 @@ def half(p: Params, side: str, press: float = 0.0, knurl: bool = True, tall: flo
             caps = cap if caps is None else caps + cap
         a, b = parts.place_on_key(p, key, sw_u), parts.place_on_key(p, key, sw_l)
         c = parts.place_on_key(p, key, stem)
-        d = parts.place_on_key(p, key, sw_p)
+        d, e = parts.place_on_key(p, key, sw_p), parts.place_on_key(p, key, sw_g)
         sw_up = a if sw_up is None else sw_up + a
         sw_low = b if sw_low is None else sw_low + b
         sw_pins = d if sw_pins is None else sw_pins + d
+        sw_leg = e if sw_leg is None else sw_leg + e
         stems = c if stems is None else stems + c
     out["caps"] = world(caps)
     if voice is not None:
@@ -72,7 +78,8 @@ def half(p: Params, side: str, press: float = 0.0, knurl: bool = True, tall: flo
         bore = hole if bore is None else bore + hole
     out["switch_upper"] = world(sw_up - bore)
     out["switch_lower"] = world(sw_low)      # 下のハウジングと中央の柱
-    out["switch_pins"] = world(sw_pins)      # 電気の端子
+    out["switch_pins"] = world(sw_pins)      # 電気の端子（4 つの向きを重ねた形）
+    out["switch_leg"] = world(sw_leg)        # 端子でない脚（同上）
     out["stems"] = world(stems)
     if lay.wheel is not None:
         out["wheel"] = world(parts.wheel_in_place(p, lay, knurl))

@@ -4,8 +4,9 @@
 下面（w = -plate_t）。スイッチ穴のふちは厚み clip_t の平らな板で、Choc V2 の爪はこの板の
 下面に掛かる。板の下は穴の間を深いリブにし、爪が開く所だけを外へ広げてある（爪の逃げ）。
 
-上面は、参考画像に合わせて縁をやわらげてある。外周は面取りの帯、キーのくぼみの縁は細い
-面取り、球の穴とホイールの窓はふちをなだらかに斜めに落としてある。
+上面は、参考画像に合わせて縁をやわらげてある。外周は面取りの帯（上から見た角は丸める）、
+キーのくぼみの縁は細い面取り、球の穴とホイールの窓はふちをなだらかに斜めに落としてある。
+左のプレートには、Space とホイールの間に低い仕切りが付く。
 """
 
 from __future__ import annotations
@@ -186,11 +187,19 @@ def wheel_pads(p: Params, lay: Layout) -> Manifold:
 
 
 def lip(p: Params, lay: Layout) -> Manifold:
-    """Space とホイールの間の低い仕切り（lip_h を 0 より大きくしたときだけ付く）。"""
+    """Space とホイールの間の低い仕切り（lip_h を 0 より大きくしたときだけ付く）。
+
+    Space を押す親指がホイールに触れないようにする畝。軸を上から落とし込む溝が仕切りの下を
+    通るので、溝の真上は仕切りを幅いっぱいに切り欠き、2 本の畝に分ける。溝の端と仕切りの
+    側面の間に、薄いひれを残さないため。切り欠きは溝より片側 0.3 mm 広い。
+    """
     u0, u1, v0, v1 = lay.lip
     foot = geom.section([(u0, v0), (u1, v0), (u1, v1), (u0, v1)])
     crown = geom.grow(foot, -min(0.6, (u1 - u0) / 2.0 - 0.3))
-    return geom.loft(foot, p.top - 0.5, crown, p.top + p.lip_h)
+    ridge = geom.loft(foot, p.top - 0.5, crown, p.top + p.lip_h)
+    _u0, _u1, w0, w1 = lay.wheel
+    vc, half = (w0 + w1) / 2.0, (p.axle_d + 0.25) / 2.0 + 0.3
+    return ridge - geom.box(u0 - 1.0, u1 + 1.0, vc - half, vc + half, p.top - 1.0, p.top + p.lip_h + 1.0)
 
 
 # ---- 全体 ----------------------------------------------------------------------

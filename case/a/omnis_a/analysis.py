@@ -31,9 +31,10 @@ def centroid(manifold) -> tuple[np.ndarray, float]:
 # ---- 倒れにくさ -----------------------------------------------------------------
 
 SUPPORTS = ("pads", "centres", "foot")
+SPOTS = ("centre", "rim")
 
 
-def _hull(points: np.ndarray) -> np.ndarray:
+def hull(points: np.ndarray) -> np.ndarray:
     """点の集まりを囲む凸多角形（反時計回り）。"""
     pts = sorted(map(tuple, np.round(points, 9)))
 
@@ -60,11 +61,11 @@ def support_polygon(p: Params, lay, support: str = "pads") -> tuple[np.ndarray, 
         return geom.polygons(shell.foot_outline(p, lay))[0], 0.0
     centres = np.array(shell.pad_centres(p, lay))
     if support == "centres":
-        return _hull(centres), p.pad_h
+        return hull(centres), p.pad_h
     if support != "pads":
         raise ValueError(support)
     ring = np.array([[math.cos(a), math.sin(a)] for a in np.linspace(0.0, 2.0 * math.pi, 48, endpoint=False)])
-    return _hull(np.concatenate([c + p.pad_d / 2.0 * ring for c in centres])), p.pad_h
+    return hull(np.concatenate([c + p.pad_d / 2.0 * ring for c in centres])), p.pad_h
 
 
 @dataclass(frozen=True)
@@ -76,13 +77,18 @@ class Stability:
     landing: dict               # キーの名前 -> 押す力の向きが机に届く点が、支えの外に出る量（mm）
 
 
-def stability(p: Params, side: str, support: str = "pads") -> Stability:
+def stability(p: Params, side: str, support: str = "pads", spot: str = "centre") -> Stability:
     """キーを、キー面に垂直に押したときの倒れにくさ。
 
     押す力の向きを机まで延ばした点が支えの内側なら、どれだけ強く押しても倒れない。
     外側なら、支えの縁を支点にして、力のモーメントが自重のモーメントを超えると倒れ始める。
     ゴム足を貼るとケースがその厚みだけ浮き、力の向きが机に届く点はさらに内側へずれる。
+
+    押す位置は spot で選ぶ。"centre" は各キーの中央。"rim" はキャップの縁（四隅と、各辺のまん中）
+    のうち、いちばん倒れやすい所。
     """
+    if spot not in SPOTS:
+        raise ValueError(spot)
     lay = assembly.layout(p, side)
     half = assembly.half(p, side, knurl=False)
     items = []
@@ -103,19 +109,25 @@ def stability(p: Params, side: str, support: str = "pads") -> Stability:
     tip, landing = {}, {}
     for key in lay.keys:
         _z0, z1 = parts.cap_heights(p, key)
-        point = rot @ np.array([key.u, key.v, z1 - key.sink]) + trans
-        ground = point + push * (-(point[2] + lift) / push[2])
+        if spot == "centre":
+            offsets = [(0.0, 0.0)]
+        else:
+            offsets = [(i * key.cap_w / 2.0, j * key.cap_d / 2.0) for i in (-1, 0, 1) for j in (-1, 0, 1) if (i, j) != (0, 0)]
         best, beyond = math.inf, 0.0
-        for i in range(len(ground_poly)):
-            a, b = ground_poly[i], ground_poly[(i + 1) % len(ground_poly)]
-            edge = b - a
-            out = np.array([edge[1], -edge[0]]) / np.linalg.norm(edge)
-            over = float((ground[:2] - a) @ out)
-            if over > 1e-9:
-                arm = float(-((cg[:2] - a) @ out))
-                force = mass * 9.81e-3 * arm / (abs(push[2]) * over)
-                if force < best:
-                    best, beyond = force, over
+        for du, dv in offsets:
+            du, dv, _ = geom.rot_z(key.rot) @ np.array([du, dv, 0.0])
+            point = rot @ np.array([key.u + du, key.v + dv, z1 - key.sink]) + trans
+            ground = point + push * (-(point[2] + lift) / push[2])
+            for i in range(len(ground_poly)):
+                a, b = ground_poly[i], ground_poly[(i + 1) % len(ground_poly)]
+                edge = b - a
+                out = np.array([edge[1], -edge[0]]) / np.linalg.norm(edge)
+                over = float((ground[:2] - a) @ out)
+                if over > 1e-9:
+                    arm = float(-((cg[:2] - a) @ out))
+                    force = mass * 9.81e-3 * arm / (abs(push[2]) * over)
+                    if force < best:
+                        best, beyond = force, over
         tip[key.name] = best
         landing[key.name] = beyond
     return Stability(mass, cg, (float(ground_poly[:, 0].min()), float(ground_poly[:, 0].max())), tip, landing)

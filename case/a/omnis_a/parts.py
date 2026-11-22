@@ -30,14 +30,15 @@ def _stack(levels) -> Manifold:
 
 
 def cap_heights(p: Params, key: Key) -> tuple[float, float]:
-    """キャップの下端と上面の高さ（そのキーのスイッチが載る面から）。
+    """キャップの下端と上面の高さ（そのキーのスイッチが載る面から。軸の先端が公称の高さのとき）。
 
-    下端は、図面の公差の端（ストロークが長く、ハウジングが高い）のスイッチを押し切っても
-    cap_margin が残る高さにする。文字キーのキャップはハウジングをまたぐので、つばの上面が相手。
-    音声入力キーの小さいキャップはまたげないので、ハウジングの上端が相手になる。
+    キャップは軸の先端に座るので、先端が低いスイッチでは、キャップもそのぶん低くなる。
+    下端は、図面の公差の端（ストロークが長く、ハウジングが高く、軸の先端が低い）のスイッチを
+    押し切っても cap_margin が残る高さにする。文字キーのキャップはハウジングをまたぐので、
+    つばの上面が相手。音声入力キーの小さいキャップはまたげないので、ハウジングの上端が相手になる。
     """
     if key.kind == "voice":
-        skirt = p.sw_top + p.sw_height_tol + p.travel_max + p.cap_margin
+        skirt = p.sw_top + p.sw_height_tol + p.travel_max + p.sw_stem_tol + p.cap_margin
         return skirt, skirt + p.voice_cap_h
     return p.cap_skirt, p.cap_top
 
@@ -82,7 +83,7 @@ def keycap_printable(p: Params, key: Key) -> Manifold:
 LOOK = {
     "alpha": dict(top=12.2, taper=2.2, fillet=0.9, corner=1.7, dish=0.35),
     "thumb": dict(top=12.2, taper=2.2, fillet=0.9, corner=1.7, dish=0.3),
-    "voice": dict(top=9.0, taper=1.2, fillet=0.6, corner=1.4, dish=0.0),
+    "voice": dict(top=9.15, taper=1.2, fillet=0.6, corner=1.4, dish=0.0),
 }
 
 
@@ -126,13 +127,13 @@ def place_on_key(p: Params, key: Key, m: Manifold, press: float = 0.0) -> Manifo
     return geom.move(m, geom.rot_z(key.rot), np.array([key.u, key.v, -key.sink - press]))
 
 
-def switch(p: Params, tall: float = 0.0) -> tuple[Manifold, Manifold, Manifold]:
+def switch(p: Params, tall: float = 0.0) -> tuple[Manifold, Manifold]:
     """Choc V2 のおおよその形。原点はスイッチが載る面。
 
-    プレートより上のハウジング、プレートより下のハウジング（中央の柱を含む）、電気の端子の
-    3 つに分けて返す。上は、つば（15 mm 角）、その上のまっすぐな部分（下ハウジングと同じ幅）、
-    上端へすぼまる部分。tall を渡すと、上のハウジングの高さをそのぶん増やす（公差の端を確かめる
-    とき）。軸は入れていない（キーキャップと一緒に動くため）。
+    プレートより上のハウジングと、プレートより下のハウジング（中央の柱を含む）に分けて返す。
+    上は、つば（15 mm 角）、その上のまっすぐな部分（下ハウジングと同じ幅）、上端へすぼまる部分。
+    tall を渡すと、上のハウジングの高さをそのぶん増やす（公差の端を確かめるとき）。
+    軸は入れていない（キーキャップと一緒に動くため）。底から出る脚は legs で作る。
     """
     f, b = p.sw_flange, p.sw_body
     upper = geom.prism(geom.rect(0, 0, f, f), 0.0, p.sw_flange_t + tall)
@@ -141,11 +142,42 @@ def switch(p: Params, tall: float = 0.0) -> tuple[Manifold, Manifold, Manifold]:
                        geom.rect(0, 0, p.sw_crown, p.sw_crown), p.sw_top + tall)
     lower = geom.prism(geom.rect(0, 0, b, b), -p.sw_below, EPS)
     lower += Manifold.cylinder(p.sw_post + 0.2, 2.4, 2.4, 32).translate((0, 0, -p.sw_below - p.sw_post))
-    pins = None
-    for px, py in ((0.0, 5.9), (5.0, 3.8)):
-        pin = Manifold.cylinder(p.sw_pin + 0.2, 0.6, 0.6, 12).translate((px, py, -p.sw_below - p.sw_pin))
-        pins = pin if pins is None else pins + pin
-    return upper, lower, pins
+    return upper, lower
+
+
+# ハウジングの底から出る 3 本の脚（図面の基板の穴の位置。スイッチを上から見た向き）。
+# 太さは基板の穴の径で代用する（実物の脚より少し太い）。
+TERMINALS = ((0.0, 5.9), (5.0, 3.8))    # 電気の端子 2 本。穴は直径 1.20
+TERMINAL_D = 1.2
+LEG = (-5.0, -5.15)                     # 端子でない脚 1 本。穴は直径 1.60
+LEG_D = 1.6
+QUARTERS = (0, 1, 2, 3)                 # スイッチを挿せる 4 つの向き（90° 刻み）
+
+
+def reach(spots, diameter: float) -> float:
+    """スイッチの中心から、脚のいちばん遠い所までの距離。"""
+    return max(math.hypot(x, y) for x, y in spots) + diameter / 2.0
+
+
+def legs(p: Params, quarter: int = 0, mirror: bool = False) -> tuple[Manifold, Manifold]:
+    """スイッチの脚。電気の端子 2 本と、端子でない脚 1 本に分けて返す。原点はスイッチが載る面。
+
+    quarter は挿す向き。爪の逃げは穴の 4 辺にあるので、スイッチは 90° 刻みの 4 通りに挿せる。
+    quarter が 0 のとき、まん中寄りの端子が奥（+v）に来る。1 で外側、2 で手前、3 で内側。
+    右手の形は左右を反転して作るので、反転する前の座標では脚の並びも鏡写しになる。
+    右手ぶんを作るときは mirror を渡す。
+    """
+    flip = -1.0 if mirror else 1.0
+
+    def rods(spots, diameter: float) -> Manifold:
+        out = None
+        for x, y in spots:
+            rod = Manifold.cylinder(p.sw_pin + 0.2, diameter / 2.0, diameter / 2.0, 16)
+            rod = rod.translate((flip * x, y, -p.sw_below - p.sw_pin))
+            out = rod if out is None else out + rod
+        return geom.move(out, geom.rot_z(90.0 * quarter), np.zeros(3))
+
+    return rods(TERMINALS, TERMINAL_D), rods((LEG,), LEG_D)
 
 
 def latch(p: Params, quarter: int = 0) -> Manifold:

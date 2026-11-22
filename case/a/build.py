@@ -4,8 +4,9 @@
     .venv/bin/python build.py --tilt 20 --slope 0  # 傾斜台だけを別の姿勢で（left_base_tilt20_slope0.stl など）
     .venv/bin/python build.py --set hole=14.2 --out ~/omnis-hole142   # 寸法を変えて別の場所へ
 
-書き出した STL は読み直し、閉じた形でなければ止まる。作ったときの寸法は、STL と同じ場所の
-build.json に記録する。check.py、render.py、estimate.py はこの記録を読んで、同じ寸法で動く。
+書き出した STL は読み直し、閉じた形でなければ止まる。作ったときの寸法のすべてと、形を作る
+コードの版は、STL と同じ場所の build.json に記録する。check.py、render.py、estimate.py は
+この記録を読んで、同じ寸法で動く。
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ sys.path.insert(0, str(HERE))
 
 from omnis_a import assembly, manifest, parts, plate, shell  # noqa: E402
 from omnis_a.layout import Key  # noqa: E402
-from omnis_a.params import DEFAULT, Params  # noqa: E402
+from omnis_a.params import DEFAULT, MODEL, Params  # noqa: E402
 
 
 def to_trimesh(manifold) -> trimesh.Trimesh:
@@ -80,7 +81,7 @@ def fit_problems(p: Params) -> list[str]:
     for side in assembly.SIDES:
         half = assembly.half(p, side, knurl=False)
         base = half["base"] + half["foot"]
-        inside = half["plate"] + half["switch_lower"] + half["switch_pins"]
+        inside = half["plate"] + half["switch_lower"] + half["switch_pins"] + half["switch_leg"]
         for extra in ("ball", "wheel"):
             if extra in half:
                 inside += half[extra]
@@ -130,17 +131,20 @@ def main() -> None:
     if only_base:
         tag = manifest.posture_tag(args.tilt, args.slope)
         todo = {f"{name}{tag}": m for name, m in base_parts(p).items()}
-        # 載せるプレートは同じ場所のものを使う。別の寸法で作ってあったら、合わないので止まる。
+        # 載せるプレートは同じ場所のものを使う。別の寸法や別の版で作ってあったら、合わないので止まる。
         for side in assembly.SIDES:
-            entry = manifest.read(args.out).get(f"{side}_plate.stl")
-            if entry is not None and manifest.params_from(entry["params"]).with_(tilt=p.tilt, slope=p.slope) != p:
-                raise SystemExit(f"{args.out} のプレートは別の寸法（{manifest.describe(manifest.params_from(entry['params']))}）"
+            name = f"{side}_plate.stl"
+            if name not in manifest.registered(args.out):
+                continue
+            made = manifest.params_of(args.out, name)
+            if made.with_(tilt=p.tilt, slope=p.slope) != p:
+                raise SystemExit(f"{args.out} のプレートは別の寸法（{manifest.describe(made)}）"
                                  "で作られています。同じ --set を付けるか、--out で別の場所へ出してください。")
     else:
         todo = all_parts(p)
 
     leans = shell.wall_leans(p, assembly.layout(p, "left"))
-    print(f"姿勢は左右 {p.tilt:g}°、前後 {p.slope:g}°（合わせて {shell.steepest(p):.1f}°）。"
+    print(f"モデルの版は {MODEL}。姿勢は左右 {p.tilt:g}°、前後 {p.slope:g}°（合わせて {shell.steepest(p):.1f}°）。"
           f"壁の寝かせは内側 {leans['cheek']:.1f}°、奥 {leans['back']:.1f}°。寸法は{manifest.describe(p)}")
     for name, m in todo.items():
         back = write_stl(m, args.out / f"{name}.stl")
@@ -148,7 +152,7 @@ def main() -> None:
         print(f"  {name}.stl  {size[0]:.1f} × {size[1]:.1f} × {size[2]:.1f} mm  "
               f"{back.volume / 1000:.1f} cm³  閉じた形")
     manifest.record(args.out, {f"{name}.stl": p for name in todo})
-    print(f"寸法の記録: {args.out / manifest.NAME}")
+    print(f"寸法と版の記録: {args.out / manifest.NAME}")
     if only_base:
         print(f"確かめるには: check.py --stl {args.out} {manifest.tag_options(tag)}")
 

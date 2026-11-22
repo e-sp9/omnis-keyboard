@@ -14,6 +14,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+# 形を作るコードの版。同じ寸法から出る形が変わる変更をしたら上げる。build.py が STL と一緒に
+# build.json へ記録し、check.py、render.py、estimate.py は、この版で作った一式だけを扱う。
+# A-2.1 より前（コミット 7a316ad まで）の記録には版がなく、既定値と違う寸法しか残っていない。
+MODEL = "A-2.1"
+
 
 @dataclass(frozen=True)
 class Params:
@@ -42,13 +47,14 @@ class Params:
     sw_shoulder: float = 1.6    # プレート上面から、ハウジングがすぼまり始める高さ（同上）
     sw_crown: float = 12.4      # ハウジング上端の幅（同上）
     sw_top: float = 3.1         # プレート上面からハウジング上端
-    sw_stem: float = 6.4        # プレート上面から軸の先端（押していないとき）
+    sw_stem: float = 6.4        # プレート上面から軸の先端（押していないとき）。キャップはここに座る
+    sw_stem_tol: float = 0.15   # その公差（図面の一般公差。5 mm を超え 10 mm 以下は ±0.15）
     sw_travel: float = 3.2
     sw_travel_tol: float = 0.25  # ストロークの公差（3.2±0.25）
     sw_height_tol: float = 0.10  # 高さの寸法の公差（図面の一般公差。5 mm 以下は ±0.10）
     sw_below: float = 2.2       # プレート上面からハウジングの底
     sw_post: float = 3.3        # 底から中央の柱の先まで
-    sw_pin: float = 3.0         # 底から端子の先まで
+    sw_pin: float = 3.0         # 底から脚の先まで。端子 2 本と、端子でない脚 1 本（図面は 3-3.00±0.2）
     sw_clip: float = 1.65       # プレート上面（つばの下面）から、プレートに掛かる爪の肩まで
     sw_clip_w: float = 4.0      # 爪の幅（図から読んだおおよその値。向かい合う2面の中央に1本ずつ）
     sw_clip_out: float = 0.3    # 爪が下ハウジングの面から出る量（同上）
@@ -75,7 +81,8 @@ class Params:
     back_cut_v: float = 12.4    # 同じく奥行き
     chamfer_top: float = 1.5    # 上面と側面の間の面取りの帯
     chamfer_soft: float = 0.35  # 帯の上下の縁をさらに落とす量（縁を丸く見せる）
-    chamfer_corner: float = 2.2  # 縦の角の面取り
+    chamfer_corner: float = 2.2  # 縦の角の面取り。上面と帯は、この面取りに内側から接する円で角を丸める
+    corner_blend: float = 10.0  # 面取りをしない浅い角（奥の斜めの辺の始まり）で、上面と帯を丸める半径
     wall: float = 2.4           # 傾斜台の壁の厚み（0.4 mm ノズルで 6 本）
     well_chamfer: float = 0.4   # キーのくぼみの縁の面取り
 
@@ -85,10 +92,13 @@ class Params:
     plug_gap: float = 0.25      # プレートの差し込み部と傾斜台の壁のすき間
 
     # ---- 足と底 ---------------------------------------------------------------
-    # 底の台。壁の下端から 45° で foot_inset だけ内へ絞り、そこから foot_h だけまっすぐ下ろす。
-    # 黒にするなら、壁の下端（高さ foot_h + foot_inset、底の板の上面と同じ）までを黒で印刷する。
-    foot_h: float = 1.0         # 台のまっすぐな部分の高さ
-    foot_inset: float = 1.2     # 台が壁から引っ込む量
+    # 底の台（黒にする部分）。外から見える段差で、底の板の厚みとは別に決める。
+    # 壁は高さ foot_h で終わる。台はそこから foot_step だけ水平に引っ込み（段差）、45° で
+    # foot_inset まで絞ってから、まっすぐ机へ下りる。黒にするなら、高さ foot_h までを黒で印刷する。
+    foot_h: float = 2.6         # 台の高さ（机から壁の下端まで）。0.2 mm 積層で 13 層
+    foot_inset: float = 1.2     # 台のまっすぐな側面が、壁から引っ込む量
+    foot_step: float = 0.6      # 壁の下端の、水平な段差の幅（支えなしで張り出せる 0.8 mm より小さく）
+    floor_t: float = 2.2        # 底の板の厚み（机から、ケースの中の底の面まで）
     pad_d: float = 8.0          # 貼るゴム足の直径（平らなもの）
     pad_h: float = 2.0          # ゴム足の厚み。厚いほど倒れやすくなる
     pad_edge: float = 0.6       # ゴム足の縁から台の縁まで
@@ -103,8 +113,7 @@ class Params:
     space_w: float = 1.75       # 左の親指キー（Space）の幅。u 単位
     enter_w: float = 1.25       # 右の親指キー（Enter）の幅
     voice_cap: float = 14.0     # 音声入力キーのキャップ
-    voice_sink: float = 1.8     # 音声入力キーのスイッチを沈める量。残る板がちょうど clip_t になる深さ
-    voice_u: float = -1.0       # 音声入力キーの中心
+    voice_u: float = -1.0       # 音声入力キーの中心（沈める量は voice_sink。clip_t から決まる）
 
     # ---- 配置（版A-1で決めた位置。A-2 では動かさない）---------------------------
     v_front: float = -41.9                           # 手前の縁
@@ -123,7 +132,7 @@ class Params:
     wheel_pad_r: float = 1.5    # 当たりの幅の半分（ホイールの端面は、軸に近いここに触れて止まる）
     wheel_play: float = 0.2     # ホイールの端面と当たりのすき間（片側）
     axle_d: float = 1.75        # 軸。フィラメントの切れ端を使う
-    lip_h: float = 0.0          # Space とホイールの間の仕切りの高さ（参考画像にないので付けない。付けるなら 2.2）
+    lip_h: float = 2.2          # Space とホイールの間の仕切りの高さ（Space を押す親指がホイールに触れないように）
     lip_w: float = 2.0          # 仕切りの幅
     pocket_r: float = 2.5       # ホイールの窓の角の丸み（上から見て）
     pocket_ring: float = 1.0    # ホイールの窓のふちを斜めに落とす幅
@@ -138,7 +147,10 @@ class Params:
     ball_seat_deg: float = 60.0  # 受けの突起の位置。球の真下から測った角度
 
     # ---- キーキャップ（印刷する場合の形。プレビューもこの形）--------------------------
-    cap_skirt: float = 4.6      # スイッチ板の上面から、キャップの下端（押していないとき）
+    # キャップは軸の先端に座る。下端の高さは、軸の先端が公称の高さ sw_stem にあるときの値で書く。
+    # 公差の端（ストロークが長い、ハウジングが高い、軸の先端が低い）のスイッチを押し切っても、
+    # キャップの下に cap_margin が残る高さにしてある：0.8 + 0.10 + 3.45 + 0.15 + 0.25 = 4.75。
+    cap_skirt: float = 4.75     # スイッチ板の上面から、キャップの下端（押していないとき）
     cap_margin: float = 0.25    # 公差の端のスイッチを押し切っても、キャップの下に残すすき間
     cap_top: float = 10.5       # 同じく、キャップの上面
     cap_taper: float = 1.7      # 上面が下端より片側ずつ小さくなる量
@@ -156,8 +168,27 @@ class Params:
     # ---- 導いた値 -------------------------------------------------------------
     @property
     def floor_top(self) -> float:
-        """底の板の上面の高さ（机から）。壁の下端と同じ高さ。"""
-        return self.foot_h + self.foot_inset
+        """底の板の上面の高さ（机から）。"""
+        return self.floor_t
+
+    @property
+    def foot_riser(self) -> float:
+        """底の台の、まっすぐな側面の高さ。その上は 45° で壁の下端へ広がる。"""
+        return self.foot_h - (self.foot_inset - self.foot_step)
+
+    @property
+    def voice_sink(self) -> float:
+        """音声入力キーのスイッチを沈める量。
+
+        残る板（スイッチが載る面からプレートの下面まで）が、ちょうど爪を受ける板の厚み clip_t に
+        なる深さ。爪は板の下面に掛かる。clip_t を変えると、この深さも一緒に変わる。
+        """
+        return round(self.plate_t - self.clip_t, 6)
+
+    @property
+    def stem_low(self) -> float:
+        """キャップが座る軸の先端の高さの下限。"""
+        return self.sw_stem - self.sw_stem_tol
 
     @property
     def travel_max(self) -> float:

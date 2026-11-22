@@ -14,9 +14,10 @@
     .venv/bin/python render.py --stl ~/omnis-hole142  # 別の場所に出した一式
 
 形は STL を読むのではなく、build.py と同じ関数から直接作る。寸法は既定値ではなく、STL と同じ
-場所の build.json（build.py が書く、作ったときの寸法の記録）から読む。stl/ の一式は preview/ に、
-それ以外は使い捨ての置き場（環境変数 OMNIS_SCRATCH、なければ ~/.cache/omnis-case-a）に出す。
-描画用の一時ファイルも使い捨ての置き場に書く。
+場所の build.json（build.py が書く、作ったときの寸法とコードの版の記録）から読む。古い形式の
+記録や、別の版のコードで作った STL は、同じ形を作り直せないので、描く前にそう知らせて止まる。
+stl/ の一式は preview/ に、それ以外は使い捨ての置き場（環境変数 OMNIS_SCRATCH、なければ
+~/.cache/omnis-case-a）に出す。描画用の一時ファイルも使い捨ての置き場に書く。
 
 キーキャップは、参考画像に近い丸みのある形で描く（parts.keycap_look）。印刷用のキャップ
 （stl/keycap_*.stl）の形とは違い、描くだけのもの。部品の図（parts）だけは印刷用の形で描く。
@@ -39,14 +40,18 @@ sys.path.insert(0, str(HERE))
 
 import build  # noqa: E402
 from omnis_a import assembly, geom, manifest, parts, shell, workdir  # noqa: E402
-from omnis_a.params import Params  # noqa: E402
+from omnis_a.params import MODEL, Params  # noqa: E402
 
 PREVIEW = HERE / "preview"
 CACHE = workdir.scratch("render")
 REFERENCE = HERE / "reference" / "chamfer-inner-wheel.jpg"
 
 # 参考画像に合わせたカメラ。参考画像のケースの角とキーの位置に、この形の同じ点が重なるように
-# 求めた。近くから広い画角で撮った絵で、左右の間隔は足もとで gap。
+# 求めた。近くから広い画角で撮った絵で、左右の間隔は足もとで gap。yaw は、左右をそれぞれ内側が
+# 手前へ出る向きへ振る角度で、これも同じように求めた。
+# 参考画像の手前の壁はカメラに正対していて、手前の壁の下端の線だけなら yaw = -1.6 で合う。
+# ただ、そうすると上面の角と壁の下端の角 6 点のずれ（二乗平均）が 18 画素から 32 画素に増えるので、
+# 3.0 のままにしてある（README の「参考画像との違い」）。
 HERO = dict(gap=34.0, yaw=3.0, elevation=21.0, distance=275.5, fov=50.4, target=(0.0, -0.2, 22.6),
             size=(1500, 750), spp=512)
 SEAT = dict(HERO, elevation=48.0, distance=420.0, fov=36.0, target=(0.0, 2.0, 18.0), size=(1500, 900))
@@ -71,7 +76,7 @@ MATERIALS = {
 GROUP_MATERIAL = {
     "plate": "case", "base": "case", "foot": "foot", "caps": "caps", "voice_cap": "voice",
     "ball": "ball", "wheel": "wheel", "axle": "wheel", "switch_upper": "switch",
-    "switch_lower": "switch", "switch_pins": "switch", "stems": "switch",
+    "switch_lower": "switch", "switch_pins": "switch", "switch_leg": "switch", "stems": "switch",
 }
 SMOOTH = ("caps", "voice")      # 面で分けず、なめらかに描く材質（丸みのあるキーキャップ）
 
@@ -230,16 +235,21 @@ def seat(p: Params, spp: int | None = None) -> Image.Image:
     return view(p, dict(SEAT, spp=spp or SEAT["spp"]))
 
 
-def _extent(p: Params) -> tuple[float, float, float, float]:
-    """左の片手ぶんの、幅、奥行き、ケースの高さ、キーキャップまでの高さ。"""
-    half = assembly.half(p, "left", knurl=False)
-    case = half["plate"] + half["base"] + half["foot"]
-    bb = case.bounding_box()
-    return bb[3] - bb[0], bb[4] - bb[1], bb[5], (case + half["caps"]).bounding_box()[5]
+CASE = ("plate", "base", "foot")      # ケース（キーキャップ、球、ホイールを除く）
 
 
-def _dimension(draw, a, b, text, font, ink=(40, 40, 40), side: str = "below") -> None:
-    """2 点の間に寸法線を引き、数字を書く。"""
+def _box(items, prefix: str = "", groups: tuple | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """描く形の外寸。名前が prefix で始まり、残りが groups に入るものだけを合わせる。
+
+    寸法線は、ここで測った「実際に描く形」に合わせて引く。
+    """
+    boxes = [np.array(m.bounding_box()) for name, _material, m in items
+             if name.startswith(prefix) and (groups is None or name[len(prefix):] in groups)]
+    return np.min([b[:3] for b in boxes], axis=0), np.max([b[3:] for b in boxes], axis=0)
+
+
+def _dimension(draw, a, b, text, font, ink=(40, 40, 40), side: str = "left") -> None:
+    """2 点の間に寸法線を引き、数字を書く。縦の線では、side の側に数字を書く。"""
     draw.line([a, b], fill=ink, width=2)
     for x, y in (a, b):
         if abs(a[1] - b[1]) < 1:
@@ -249,8 +259,10 @@ def _dimension(draw, a, b, text, font, ink=(40, 40, 40), side: str = "below") ->
     mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
     if abs(a[1] - b[1]) < 1:
         draw.text((mid[0], mid[1] + 6), text, fill=ink, font=font, anchor="ma")
-    else:
+    elif side == "left":
         draw.text((mid[0] - 10, mid[1]), text, fill=ink, font=font, anchor="rm")
+    else:
+        draw.text((mid[0] + 10, mid[1]), text, fill=ink, font=font, anchor="lm")
 
 
 def front(p: Params, spp: int | None = None) -> Image.Image:
@@ -259,19 +271,24 @@ def front(p: Params, spp: int | None = None) -> Image.Image:
     size, width = (1500, 520), 290.0
     centre_z = 30.0
     wall = geom.box(-2000.0, 2000.0, 400.0, 410.0, 0.0, 2000.0)     # 背景の壁
-    img = shoot(pair(p, gap) + [("backdrop", "desk", wall)], (0.0, -900.0, centre_z),
+    items = pair(p, gap)
+    img = shoot(items + [("backdrop", "desk", wall)], (0.0, -900.0, centre_z),
                 (0.0, 0.0, centre_z), size, spp or 256, ortho_width=width)
     scale = size[0] / width
 
     def px(x: float, z: float) -> tuple[float, float]:
         return (size[0] / 2 + x * scale, size[1] / 2 - (z - centre_z) * scale)
 
-    w_case, _depth, top_case, top_caps = _extent(p)
-    x0 = -(gap / 2 + w_case)
+    # 寸法線は、描いた形そのものの外寸に合わせる。高さは、描いたキーキャップの上端（左）と、
+    # ケースの上端（右）。キーキャップはプレビュー用の形なので、印刷用のキャップより少し高い。
+    lo, hi = _box(items, "left_", CASE)
+    _lo_all, hi_all = _box(items)
+    _lo_r, hi_r = _box(items, "right_", CASE)
     draw, font = ImageDraw.Draw(img), _font(26)
-    _dimension(draw, px(x0, -7), px(-gap / 2, -7), f"{w_case:.0f} mm", font)
-    _dimension(draw, px(x0 - 9, 0), px(x0 - 9, top_caps), f"{top_caps:.0f} mm", font)
-    draw.text(px(x0 + 4, top_case + 22), f"tilt {p.tilt:g}° / slope {p.slope:g}°", fill=(40, 40, 40),
+    _dimension(draw, px(lo[0], -7), px(hi[0], -7), f"{hi[0] - lo[0]:.1f} mm", font)
+    _dimension(draw, px(lo[0] - 7, 0), px(lo[0] - 7, hi_all[2]), f"{hi_all[2]:.1f} mm", font)
+    _dimension(draw, px(hi_r[0] + 7, 0), px(hi_r[0] + 7, hi_r[2]), f"{hi_r[2]:.1f} mm", font, side="right")
+    draw.text(px(lo[0] + 4, hi[2] + 22), f"tilt {p.tilt:g}° / slope {p.slope:g}°", fill=(40, 40, 40),
               font=_font(24), anchor="lm")
     return img
 
@@ -281,20 +298,22 @@ def side(p: Params, spp: int | None = None) -> Image.Image:
     size, width = (1500, 640), 190.0
     centre_z = 28.0
     half = assembly.half(p, "left", look=True)
-    bb = (half["base"] + half["foot"]).bounding_box()
-    mid_y = (bb[1] + bb[4]) / 2.0
     items = [(f"left_{group}", GROUP_MATERIAL[group], m) for group, m in half.items()]
-    items.append(("backdrop", "desk", geom.box(-410.0, -400.0, -2000.0, 2000.0, 0.0, 2000.0)))
-    img = shoot(items, (900.0, mid_y, centre_z), (0.0, mid_y, centre_z), size, spp or 256, ortho_width=width)
+    lo, hi = _box(items, "left_", CASE)          # 寸法線は、描いた形そのものの外寸に合わせる
+    _lo_all, hi_all = _box(items)
+    mid_y = (lo[1] + hi[1]) / 2.0
+    backdrop = ("backdrop", "desk", geom.box(-410.0, -400.0, -2000.0, 2000.0, 0.0, 2000.0))
+    img = shoot(items + [backdrop], (900.0, mid_y, centre_z), (0.0, mid_y, centre_z), size, spp or 256,
+                ortho_width=width)
     scale = size[0] / width
 
     def px(y: float, z: float) -> tuple[float, float]:           # 奥（+y）が画面の右
         return (size[0] / 2 + (y - mid_y) * scale, size[1] / 2 - (z - centre_z) * scale)
 
-    _w, depth, _top_case, top_caps = _extent(p)
     draw, font = ImageDraw.Draw(img), _font(26)
-    _dimension(draw, px(bb[1], -7), px(bb[4], -7), f"{depth:.0f} mm", font)
-    _dimension(draw, px(bb[1] - 8, 0), px(bb[1] - 8, top_caps), f"{top_caps:.0f} mm", font)
+    _dimension(draw, px(lo[1], -7), px(hi[1], -7), f"{hi[1] - lo[1]:.1f} mm", font)
+    _dimension(draw, px(lo[1] - 7, 0), px(lo[1] - 7, hi_all[2]), f"{hi_all[2]:.1f} mm", font)
+    _dimension(draw, px(hi[1] + 7, 0), px(hi[1] + 7, hi[2]), f"{hi[2]:.1f} mm", font, side="right")
     return img
 
 
@@ -397,12 +416,14 @@ def main() -> None:
     if unknown:
         ap.error(f"知らない図です: {' '.join(unknown)}")
     stl = args.stl.expanduser().resolve()
+    # 古い形式の記録や、別の版のコードで作った一式なら、ここで知らせて止まる（別の姿勢で描かない）
     _p_plate, p, _files = manifest.load_set(stl, args.tilt, args.slope)
     if args.out is None:
         tag = manifest.posture_tag(args.tilt, args.slope)
         args.out = PREVIEW if (stl == HERE / "stl" and not tag) else workdir.scratch("preview", stl.name + tag)
     args.out.mkdir(parents=True, exist_ok=True)
-    print(f"寸法は {stl / manifest.NAME} の記録から：{manifest.describe(p)}。出し先は {args.out}")
+    print(f"寸法は {stl / manifest.NAME} の記録から：モデルの版 {MODEL}、姿勢は左右 {p.tilt:g}°、前後 {p.slope:g}°、"
+          f"{manifest.describe(p)}。出し先は {args.out}")
     reference = Image.open(REFERENCE).convert("RGB")
 
     def save(img: Image.Image, name: str) -> None:

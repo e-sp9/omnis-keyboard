@@ -3,9 +3,13 @@
 外形は「平らな面の半空間の共通部分」として作る凸多面体で、面取りも半空間を足して作る。
 
 プレートが持つ面（上面、そのまわりの面取りの帯、合わせ目までの細い壁）は、キー面の座標で
-決めてあり、姿勢を変えても変わらない。傾斜台の壁は、合わせ目の輪郭から机へ下ろす。
-手前と外側の壁は机に垂直に立て、奥と内側の壁はキー面に垂直な向きまで寝かせる。こうすると、
-プレートの下の差し込み部をキー面に垂直に抜き差しでき、キーを押す力の向きも足の内側に落ちる。
+決めてあり、姿勢を変えても変わらない。上から見た角は、帯と上面を細かい面の並びで丸めてある。
+傾斜台の壁は、合わせ目の輪郭から机へ下ろす。手前と外側の壁は机に垂直に立て、奥と内側の壁は
+キー面に垂直な向きまで寝かせる。こうすると、プレートの下の差し込み部をキー面に垂直に
+抜き差しでき、キーを押す力の向きも足の内側に落ちる。
+
+傾斜台の下は、壁より一回り小さい台（黒にする部分）。外から見える段差の寸法（foot_h、
+foot_step、foot_inset）と、中の底の板の厚み（floor_t）は別々に決めてある。
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from functools import lru_cache
 import numpy as np
 from manifold3d import CrossSection, Manifold
 
-from . import geom, layout as lay_mod
+from . import geom, layout as lay_mod, parts
 from .geom import EPS, Plane
 from .layout import Layout, make_layout
 from .params import Params
@@ -25,6 +29,11 @@ from .params import Params
 MAINS = ("front", "cheek", "back", "diag", "outer")   # 上から見て反時計回り
 SEAT_OVER = 1.2        # 当たり面を、壁の内面より先まで延ばす量
 CABLE_SHOULDER = 2.5   # ケーブルの窓の上の角を 45° で落とす量
+ROUND_STEP = 5.0       # 上から見た角を丸める面の、向きの刻み（度）
+# スイッチの中心から、脚のいちばん遠い所までの距離（0.1 mm 単位に切り上げる）
+TERMINAL_REACH = math.ceil(parts.reach(parts.TERMINALS, parts.TERMINAL_D) * 10.0) / 10.0   # 電気の端子。6.9
+LEG_REACH = math.ceil(parts.reach((parts.LEG,), parts.LEG_D) * 10.0) / 10.0                # 端子でない脚。8.0
+LEG_FLOOR = 0.6        # 端子でない脚の先と、底の板の間に残すすき間（配線しないので、当たらなければよい）
 
 
 # ---- 姿勢 ----------------------------------------------------------------------
@@ -74,7 +83,9 @@ def base_height(p: Params) -> float:
             need = max(need,
                        lift((key.u, key.v, w), p.clear_floor) + corner,
                        lift((key.u, key.v, w - p.sw_post), p.clear_floor) + 2.4 * steep,
-                       lift((key.u, key.v, w - p.sw_pin), p.clear_floor) + 6.9 * steep)   # 端子。どの向きに挿しても
+                       # 端子と、端子でない脚。スイッチをどの向きに挿しても
+                       lift((key.u, key.v, w - p.sw_pin), p.clear_floor) + TERMINAL_REACH * steep,
+                       lift((key.u, key.v, w - p.sw_pin), LEG_FLOOR) + LEG_REACH * steep)
         if lay.wheel is None:
             centre = (lay.ball[0], lay.ball[1], lay_mod.ball_centre_w(p))
             need = max(need, lift(centre, 0.6) + p.ball_d / 2.0)
@@ -207,10 +218,50 @@ class Exterior:
     walls: tuple           # (名前, Plane)。基準の姿勢での壁と、縦の角の面取り
     bands: tuple           # 上面と壁の間の、面取りの帯
     softs: tuple           # 帯の上下の縁を落とす細い面
+    rounds: tuple          # 上から見た角で、帯と上面を丸める面
 
     @property
     def all(self) -> tuple:
-        return (self.top,) + tuple(pl for _n, pl in self.walls) + self.bands + self.softs
+        return (self.top,) + tuple(pl for _n, pl in self.walls) + self.bands + self.softs + self.rounds
+
+
+def corner_fans(p: Params, lay: Layout) -> list[tuple[str, float, tuple]]:
+    """上から見た角を丸めるための、仮の壁の面（基準の姿勢）。角ごとに、名前、円柱の半径、面の並び。
+
+    となり合う 2 枚の壁の両方に内側から接する円柱を考え、その円柱に接する面を、片方の壁の
+    向きからもう片方の向きへ、ROUND_STEP ずつ向きを変えながら並べる。円柱の軸は、2 枚の壁が
+    交わる稜と平行。縦の角を面取りしてある所では、その面取りにもちょうど接する太さにする。
+    面取りのない浅い角は、半径 corner_blend で丸める。
+
+    この面で壁を切ることはしない（縦の面取りは平らなまま残す）。この面に付けた帯で、
+    上面と帯の角だけを丸める。
+    """
+    mains0, corners0 = _nominal(p, lay)
+    chamfered = {(a, b) for a, b, _pl in corners0}
+    out = []
+    for i, a in enumerate(MAINS):
+        b = MAINS[(i + 1) % len(MAINS)]
+        na, nb = mains0[a].n, mains0[b].n
+        turn = math.acos(float(np.clip(na @ nb, -1.0, 1.0)))        # 2 枚の壁の向きの差
+        if turn < math.radians(1.0):
+            continue
+        half = turn / 2.0
+        if (a, b) in chamfered:
+            radius = p.chamfer_corner * math.sin(half) * math.cos(half) / (1.0 - math.cos(half))
+        else:
+            radius = p.corner_blend
+        edge = geom.unit(np.cross(na, nb))
+        centre = np.linalg.solve(np.array([na, nb, edge]), [mains0[a].d - radius, mains0[b].d - radius, 0.0])
+        steps = max(2, math.ceil(math.degrees(turn) / ROUND_STEP - 1e-9))
+        fan = []
+        for k in range(1, steps):
+            phi = turn * k / steps
+            if (a, b) in chamfered and abs(phi - half) < 1e-9:
+                continue                                            # 面取りの面と同じ向き
+            n = (math.sin(turn - phi) * na + math.sin(phi) * nb) / math.sin(turn)
+            fan.append(Plane(n, float(n @ centre) + radius))
+        out.append((f"{a}-{b}", radius, tuple(fan)))
+    return out
 
 
 def exterior(p: Params, lay: Layout) -> Exterior:
@@ -220,7 +271,12 @@ def exterior(p: Params, lay: Layout) -> Exterior:
     softs = []
     for (_n, pl), band in zip(ws, bands):
         softs += [geom.chamfer(top, band, p.chamfer_soft), geom.chamfer(band, pl, p.chamfer_soft)]
-    return Exterior(top, ws, bands, tuple(softs))
+    rounds = []
+    for _name, _radius, fan in corner_fans(p, lay):
+        for pl in fan:
+            band = geom.chamfer(top, pl, p.chamfer_top)
+            rounds += [band, geom.chamfer(top, band, p.chamfer_soft)]
+    return Exterior(top, ws, bands, tuple(softs), tuple(rounds))
 
 
 def exterior_solid(p: Params, lay: Layout) -> Manifold:
@@ -273,19 +329,28 @@ def plug_solid(p: Params, lay: Layout, shrink: float = 0.0) -> Manifold:
 
 # ---- 机の座標での外形 -----------------------------------------------------------
 
-def _skirt(wall: Plane, z1: float) -> Plane:
-    """壁の下端（高さ z1）から、45° で内へ絞る面。底の台へつながる。"""
+def _reach(wall: Plane, z: float) -> tuple[np.ndarray, float]:
+    """壁を高さ z で水平に切った直線。外向きの水平な単位ベクトルと、原点からの距離。"""
     flat = geom.unit((wall.n[0], wall.n[1], 0.0))
-    reach = (wall.d - wall.n[2] * z1) / float(wall.n @ flat)     # 高さ z1 で、壁の面までの距離
-    return Plane.through(flat + np.array([0.0, 0.0, -1.0]), reach * flat + np.array([0.0, 0.0, z1]))
+    return flat, (wall.d - wall.n[2] * z) / float(wall.n @ flat)
 
 
-def _world_planes(p: Params, lay: Layout):
+def _skirt(wall: Plane, z1: float, step: float = 0.0) -> Plane:
+    """高さ z1 で壁から step だけ内へ入った所を通り、下へ 45° で内へ絞る面。"""
+    flat, reach = _reach(wall, z1)
+    return Plane.through(flat + np.array([0.0, 0.0, -1.0]), (reach - step) * flat + np.array([0.0, 0.0, z1]))
+
+
+def _riser(wall: Plane, z1: float, inset: float) -> Plane:
+    """高さ z1 で壁から inset だけ内へ入った所に立つ、垂直な面。"""
+    flat, reach = _reach(wall, z1)
+    return Plane(flat, reach - inset)
+
+
+def _world_sides(p: Params, lay: Layout) -> list[tuple[str, Plane]]:
+    """壁と、縦の角の面取り（机の座標）。"""
     rot, trans = frame(p, lay)
-    sides = [pl.moved(rot, trans) for _n, pl in walls(p, lay)]
-    skirts = [_skirt(pl, p.floor_top) for pl in sides]
-    lid = Plane((0.0, 0.0, 1.0), p.top - p.seam + 1.0).moved(rot, trans)   # 合わせ目の少し上まで
-    return sides, skirts, lid
+    return [(name, pl.moved(rot, trans)) for name, pl in walls(p, lay)]
 
 
 def wall_leans(p: Params, lay: Layout) -> dict[str, float]:
@@ -296,18 +361,35 @@ def wall_leans(p: Params, lay: Layout) -> dict[str, float]:
 
 
 def body(p: Params, lay: Layout) -> Manifold:
-    """台を除いた外形（机の座標）。壁の下端から 45° で内へ絞る。"""
-    sides, skirts, lid = _world_planes(p, lay)
-    return geom.convex(sides + skirts + [lid, Plane((0.0, 0.0, -1.0), -p.foot_h)])
-
-
-def foot_outline(p: Params, lay: Layout) -> CrossSection:
-    """底の台の輪郭。上の斜面の下端より、ごくわずかに内側（稜をぴったり重ねないため）。"""
-    return geom.grow(body(p, lay).slice(p.foot_h + 0.01).simplify(geom.TINY), -2 * EPS)
+    """台を除いた外形（机の座標）。壁の下端（高さ foot_h）から上。"""
+    rot, trans = frame(p, lay)
+    lid = Plane((0.0, 0.0, 1.0), p.top - p.seam + 1.0).moved(rot, trans)   # 合わせ目の少し上まで
+    return geom.convex([pl for _n, pl in _world_sides(p, lay)] + [lid, Plane((0.0, 0.0, -1.0), -p.foot_h)])
 
 
 def foot(p: Params, lay: Layout) -> Manifold:
-    return geom.prism(foot_outline(p, lay), 0.0, p.foot_h + EPS)
+    """底の台（机の座標）。壁より一回り小さく、黒にする部分。
+
+    壁の下端で foot_step だけ水平に引っ込み（外から見える段差）、そこから 45° で foot_inset
+    まで絞って、まっすぐ机へ下りる。段差は、支えなしで張り出せる幅にとどめてある。
+    上は壁の中へ少し食い込ませて、壁とひと続きにする。
+    """
+    step = max(p.foot_step, 2 * EPS)          # 壁の面と台の面をぴったり重ねない
+    inset = max(p.foot_inset, step)
+    bend = p.foot_h - (inset - step)          # この高さから下は、まっすぐな側面
+    sides = [pl for _name, pl in _world_sides(p, lay)]
+    # 上へ広がる形は凸でないので、45° の部分とまっすぐな部分を別々に作って足す。
+    # 2 つは高さ bend をはさんで少し重ね、側面どうしがそこで交わるようにする（面をぴったり重ねない）。
+    flare = geom.convex([_skirt(pl, p.foot_h, step) for pl in sides]
+                        + [Plane((0.0, 0.0, 1.0), p.foot_h + EPS), Plane((0.0, 0.0, -1.0), -(bend - EPS))])
+    riser = geom.convex([_riser(pl, p.foot_h, inset) for pl in sides]
+                        + [Plane((0.0, 0.0, 1.0), bend + EPS), Plane((0.0, 0.0, -1.0), 0.0)])
+    return flare + riser
+
+
+def foot_outline(p: Params, lay: Layout) -> CrossSection:
+    """底の台が机に触れる輪郭。"""
+    return foot(p, lay).slice(min(0.05, p.foot_riser / 2.0)).simplify(geom.TINY)
 
 
 def _wall_extra(name: str) -> float:
@@ -322,11 +404,15 @@ def _wall_extra(name: str) -> float:
 
 
 def cavity(p: Params, lay: Layout) -> Manifold:
-    """傾斜台の中の空洞（机の座標）。壁の厚みぶん内側。上は開いていて、下は底の板の上面まで。"""
-    sides, skirts, _lid = _world_planes(p, lay)
-    names = [name for name, _pl in walls(p, lay)]
-    inner = [pl.shifted(-(p.wall + _wall_extra(name))) for name, pl in zip(names, sides)]
-    inner += [pl.shifted(-(p.wall + _wall_extra(name))) for name, pl in zip(names, skirts)]
+    """傾斜台の中の空洞（机の座標）。壁の厚みぶん内側。上は開いていて、下は底の板の上面まで。
+
+    底の隅は 45° で埋めてある（壁を底の板の上面の高さから 45° で絞った面の、壁の厚みぶん内側）。
+    壁の付け根の肉を保つためで、外の台の寸法とは関係なく、底の板の厚みだけで決まる。
+    """
+    inner = []
+    for name, pl in _world_sides(p, lay):
+        thick = p.wall + _wall_extra(name)
+        inner += [pl.shifted(-thick), _skirt(pl, p.floor_top).shifted(-thick)]
     inner.append(Plane((0.0, 0.0, -1.0), -p.floor_top))
     return geom.convex(inner)
 

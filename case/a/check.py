@@ -4,9 +4,11 @@
     .venv/bin/python check.py --tilt 20 --slope 0   # 傾斜台を left_base_tilt20_slope0.stl などに替えて確かめる
     .venv/bin/python check.py --stl ~/omnis-hole142  # 別の場所に出した一式
 
-寸法は既定値ではなく、STL と同じ場所の build.json（build.py が書く、作ったときの寸法の記録）から読む。
-確かめること：STL が記録どおりの寸法の形か、閉じた形か、外寸、スイッチ穴と爪の掛かり、姿勢と壁の向き、
-部品どうしの当たり、プレートを差し込む向き、支えなしで印刷できるか、倒れにくさ。
+寸法は既定値ではなく、STL と同じ場所の build.json（build.py が書く、作ったときの寸法とコードの版の記録）
+から読む。古い形式の記録や、別の版のコードで作った STL は、同じ形を作り直せないので、確かめる前に
+そう知らせて止まる。
+確かめること：STL が記録どおりの寸法の形か、閉じた形か、外寸、底の台と上面の角の形、スイッチ穴と爪の掛かり、
+姿勢と壁の向き、部品どうしの当たり、プレートを差し込む向き、支えなしで印刷できるか、倒れにくさ。
 どれかが設計値から外れていたら終了コード 1 で終わる。表は画面に出し、使い捨ての置き場にも書く。
 """
 
@@ -27,13 +29,16 @@ sys.path.insert(0, str(HERE))
 import build  # noqa: E402
 from omnis_a import analysis, assembly, geom, manifest, parts, plate as plate_mod, shell, workdir  # noqa: E402
 from omnis_a.layout import Key  # noqa: E402
-from omnis_a.params import Params  # noqa: E402
+from omnis_a.params import MODEL, Params  # noqa: E402
 
 PRINTED = manifest.PARTS
 JP = {"left": "左", "right": "右"}
 BRIDGE_MAX = 10.0       # 支えなしで渡してよい橋の長さ（mm）
 CANTILEVER_MAX = 0.8    # 支えなしで張り出してよい量（mm）。0.42 mm の線 2 本ぶんまで
 RIM_MIN = 0.7           # プレートの差し込み部の側面に残す壁の厚み（mm）
+HOOK_MIN = 0.005        # 爪が板に掛かる幅がこれ以下なら、届いていないとみなす（mm）
+KINK_MAX = 10.0         # 上面の外周で許す折れ角（度）。丸めた角は、これより細かい折れの並びになる
+QUARTER_JP = ("奥", "外側", "手前", "内側")     # 挿す向き 0〜3 で、まん中寄りの端子が来る側
 
 
 class Report:
@@ -101,7 +106,101 @@ def shapes(rep: Report, stl: Path, files: dict, p_plate: Params, p: Params) -> d
     return meshes
 
 
-def assembled(rep: Report, p: Params) -> None:
+def _outer(cs) -> np.ndarray:
+    """輪郭のいちばん外の多角形（穴は捨てる）。"""
+    return max(geom.polygons(cs), key=lambda poly: abs(_signed_area(poly)))
+
+
+def _to_segments(points: np.ndarray, poly: np.ndarray) -> np.ndarray:
+    """点の集まりから、多角形の辺までの距離。"""
+    a, b = poly, np.roll(poly, -1, axis=0)
+    e = b - a
+    t = np.einsum("pki,ki->pk", points[:, None, :] - a[None], e) / np.einsum("ki,ki->k", e, e)
+    near = a[None] + np.clip(t, 0.0, 1.0)[..., None] * e[None]
+    return np.linalg.norm(points[:, None, :] - near, axis=2).min(axis=1)
+
+
+def foot_profile(base: Manifold, flat: np.ndarray, at: np.ndarray, p: Params) -> dict:
+    """傾斜台の STL から、底の台の段差と底の板の厚みを測る。
+
+    flat は机に垂直な壁（手前の壁）の外向きの水平な単位ベクトル。輪郭をその向きへいちばん外まで
+    たどった位置を、高さを変えながら比べる。at は底の板のまん中あたりの点。
+    """
+    def reach(z: float) -> float:
+        return float(max((poly @ flat).max() for poly in geom.polygons(base.slice(z))))
+
+    wall = reach(p.foot_h + 0.01)
+    lo, hi = 0.0, p.foot_h + 1.0                     # 輪郭が壁の位置まで広がる高さ（壁の下端）
+    for _ in range(30):
+        mid = (lo + hi) / 2.0
+        if reach(mid) > wall - 0.02:
+            hi = mid
+        else:
+            lo = mid
+    height = hi
+    riser = reach(0.05)
+    lo, hi = 0.05, height                            # まっすぐな側面が終わる高さ
+    for _ in range(30):
+        mid = (lo + hi) / 2.0
+        if reach(mid) > riser + 0.002:
+            hi = mid
+        else:
+            lo = mid
+    column = base ^ geom.box(at[0] - 0.5, at[0] + 0.5, at[1] - 0.5, at[1] + 0.5, -1.0, p.floor_top + 1.0)
+    return {"height": height, "step": wall - reach(height - 0.01) - 0.01, "inset": wall - riser,
+            "riser": lo - 0.002, "floor": column.bounding_box()[5]}
+
+
+def top_corners(plate: Manifold, p: Params) -> dict:
+    """プレートの STL（印刷する向き）の上面のすぐ下で、外周の折れ角と、丸めた角の半径を測る。
+
+    外周は、輪郭を囲む凸多角形で見る。球の穴のふちが外周の帯にかかって欠けている所は、角ではないので
+    数えない。まっすぐ続く辺（折れ角 0.3° 未満）はひと続きにまとめ、長さ 1.5 mm を超える辺を「直線の辺」、
+    その間の短い辺の並びを「丸めた角」と数える。
+    """
+    poly = analysis.hull(_outer(plate.slice(p.plate_t + p.top - 0.02)))
+
+    def turns(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        d = np.roll(pts, -1, axis=0) - pts
+        heading = np.degrees(np.arctan2(d[:, 1], d[:, 0]))
+        return np.linalg.norm(d, axis=1), (heading - np.roll(heading, 1) + 180.0) % 360.0 - 180.0
+
+    for _ in range(3):                                # まっすぐ続く辺をまとめる
+        _length, turn = turns(poly)
+        poly = poly[np.abs(turn) >= 0.3]
+    length, turn = turns(poly)
+    n = len(poly)
+    long_edge = length > 1.5
+    radii = []
+    starts = [i for i in range(n) if long_edge[i - 1] and not long_edge[i]]
+    for i in starts:                                  # 直線と直線の間の、短い辺の並び
+        j, arc, swept = i, 0.0, abs(turn[i])
+        while not long_edge[j % n]:
+            arc += length[j % n]
+            j += 1
+            swept += abs(turn[j % n])
+        edges = j - i                                 # 短い辺は、円に外から接する折れ線。辺 1 本の長さは 2r·tan(折れ角/2)
+        radii.append(arc / edges / (2.0 * math.tan(math.radians(swept / (edges + 1)) / 2.0)))
+    sharp = sum(1 for i in range(n) if long_edge[i - 1] and long_edge[i])     # 直線どうしがじかにつながる角
+    return {"kink": float(np.abs(turn).max()), "straight": int(long_edge.sum()), "rounded": len(starts),
+            "sharp": sharp, "radius": (min(radii), max(radii)) if radii else (0.0, 0.0)}
+
+
+def seam_step(plate: Manifold, base: Manifold, p: Params, lay) -> float:
+    """合わせ目で、プレートの外面と傾斜台の外面がずれている量の最大（mm）。
+
+    plate は印刷する向きの STL、base は机の座標の STL（どちらも左右の反転を戻したもの）。
+    キー面の座標にそろえ、合わせ目のすぐ上とすぐ下の輪郭を比べる。
+    """
+    rot, trans = shell.frame(p, lay)
+    deck = plate.translate((0.0, 0.0, -p.plate_t))
+    stand = geom.move(base, rot.T, -rot.T @ trans)
+    w = p.top - p.seam
+    a, b = _outer(deck.slice(w + 0.01)), _outer(stand.slice(w - 0.01))
+    return float(max(_to_segments(a, b).max(), _to_segments(b, a).max()))
+
+
+def assembled(rep: Report, p: Params, stl: Path, files: dict) -> None:
     rep.add("## 組んだときの外寸（片手）")
     rep.add()
     rows = []
@@ -135,6 +234,53 @@ def assembled(rep: Report, p: Params) -> None:
                    f"{side} のケーブルの窓が設計値と違う")
     rep.table(["側", "底の台の面積（mm²）", "底を貫く穴の数", "ゴム足の目印の溝の面積（mm²）",
                "ケーブルの窓 幅 × 高さ（mm）", "底の板の上面から窓の下端まで（mm）"], rows)
+    rep.add("底の台（黒にする部分）の段差と、底の板の厚みは、傾斜台の STL を測った。壁は高さ "
+            f"{p.foot_h:.1f} mm で終わり、台はそこから水平に {p.foot_step:.1f} mm 引っ込む（外から見える段差）。"
+            f"そこから 45° で {p.foot_inset:.1f} mm まで絞り、高さ {p.foot_riser:.1f} mm のまっすぐな側面で机に下りる。"
+            f"底の板の厚み（{p.floor_t:.1f} mm）は、台の寸法とは別に決めてある：")
+    rep.add()
+    rows = []
+    for side in assembly.SIDES:
+        lay = assembly.layout(p, side)
+        _mesh, base = load_manifold(stl / files[f"{side}_base"])
+        if side == "right":
+            base = base.mirror((1.0, 0.0, 0.0))
+        front = dict(shell._world_sides(p, lay))["front"]
+        flat, _dist = shell._reach(front, p.foot_h)
+        centre = np.mean(shell.pad_centres(p, lay), axis=0)
+        got = foot_profile(base, flat[:2], centre, p)
+        rows.append([JP[side], f"{got['height']:.2f}", f"{got['step']:.2f}", f"{got['inset']:.2f}",
+                     f"{got['riser']:.2f}", f"{got['floor']:.2f}"])
+        for key, want, label in (("height", p.foot_h, "底の台の高さ"), ("step", p.foot_step, "底の台の水平な段差"),
+                                 ("inset", p.foot_inset, "底の台の引っ込み"), ("riser", p.foot_riser, "底の台のまっすぐな側面の高さ"),
+                                 ("floor", p.floor_t, "底の板の厚み")):
+            rep.expect(abs(got[key] - want) < 0.02, f"{side} の傾斜台：{label}が {got[key]:.2f} mm（設計値 {want:.2f}）")
+        rep.expect(p.foot_step <= CANTILEVER_MAX + 1e-9,
+                   f"底の台の段差 {p.foot_step:.2f} mm は、支えなしで張り出せる {CANTILEVER_MAX:g} mm を超える")
+    rep.table(["側", "台の高さ＝壁の下端（mm）", "水平な段差（mm）", "まっすぐな側面の引っ込み（mm）",
+               "まっすぐな側面の高さ（mm）", "底の板の厚み（mm）"], rows)
+    rep.add("上から見た角は、プレートの STL で、上面のすぐ下（0.02 mm 下）の外周を測った。丸めた角は細かい折れの"
+            f"並びになる。折れ角が {KINK_MAX:g}° を超える頂点があれば、丸まっていない角が残っている。"
+            "半径は、その折れ線が外から接する円の半径。"
+            "合わせ目のずれは、プレートと傾斜台の STL をキー面の座標にそろえ、合わせ目のすぐ上とすぐ下の外周を比べた：")
+    rep.add()
+    rows = []
+    for side in assembly.SIDES:
+        lay = assembly.layout(p, side)
+        _mesh, plate = load_manifold(stl / files[f"{side}_plate"])
+        _mesh, base = load_manifold(stl / files[f"{side}_base"])
+        if side == "right":
+            plate, base = plate.mirror((1.0, 0.0, 0.0)), base.mirror((1.0, 0.0, 0.0))
+        got = top_corners(plate, p)
+        step = seam_step(plate, base, p, lay)
+        rows.append([JP[side], got["straight"], got["rounded"], f"{got['kink']:.1f}°",
+                     f"{got['radius'][0]:.1f}〜{got['radius'][1]:.1f}", f"{step:.3f}"])
+        rep.expect(got["kink"] <= KINK_MAX, f"{side} のプレート：上面の外周に {got['kink']:.1f}° の折れ角がある")
+        rep.expect(got["sharp"] == 0 and got["rounded"] == got["straight"],
+                   f"{side} のプレート：上面の外周の角のうち、丸めていないものがある")
+        rep.expect(step < 0.03, f"{side}：合わせ目で、プレートと傾斜台の外面が {step:.3f} mm ずれている")
+    rep.table(["側", "上面の外周の直線の辺", "丸めた角", "折れ角の最大", "丸めた角の半径（mm）",
+               "合わせ目での外面のずれの最大（mm）"], rows)
     rep.add("プレートの差し込み部の側面と、スイッチ穴、爪の逃げ、キーのくぼみ、球の穴、ホイールの窓の間に残る壁の、"
             f"いちばん薄い所の厚みも測った。{RIM_MIN:.1f} mm 以上あればよいとした：")
     rep.add()
@@ -216,20 +362,24 @@ def measure_hole(solid: Manifold, centre: np.ndarray, rot: float, z_top: float, 
     return out
 
 
-def latch_grip(solid: Manifold, placed: list, play: float, p: Params, size: float) -> tuple[float, bool]:
-    """爪の形を穴に置き、爪の肩から板までのすき間と、引き上げたときに板に掛かるかを見る。
+def latch_grip(solid: Manifold, placed: list, play: float, p: Params) -> tuple[float, float, bool]:
+    """爪の形を穴に置き、爪の肩から板までのすき間、爪が板に掛かる幅、引き上げたときに掛かるかを見る。
 
-    placed は、挿す向き 2 通りぶんの爪（印刷する向きの座標）。play は設計上の遊び、size は穴の大きさ。
+    placed は、挿す向き 2 通りぶんの爪（印刷する向きの座標。向かい合う 2 本でひと組）。play は設計上の遊び。
+    掛かる幅は、遊びより over だけ多く引き上げた爪が板に食い込む体積から出す（体積 ÷ over ÷ 爪の幅）。
+    爪が穴のふちより外へ出ていなければ、食い込む体積は 0 で、掛かる幅も 0 になる。
+    どの向きでも、2 本とも HOOK_MIN より広く掛かって、はじめて「掛かる」とする。
     """
     over = 0.05                                                    # 遊びより多く引き上げる量
-    bite = over * p.sw_clip_w * (p.sw_body / 2.0 + p.sw_clip_out - size / 2.0)   # 爪 1 本が板に食い込む体積
-    gap, caught = math.inf, True
-    for latch in placed:
-        gap = min(gap, solid.min_gap(latch, 5.0))
-        free = (solid ^ latch.translate((0.0, 0.0, play - 0.03))).volume()
-        held = (solid ^ latch.translate((0.0, 0.0, play + over))).volume()
-        caught = caught and free < 1e-6 and held > 1.8 * bite       # 向かい合う 2 本とも掛かること
-    return gap, caught
+    gap, hook, caught = math.inf, math.inf, True
+    for pair in placed:
+        gap = min(gap, solid.min_gap(pair, 5.0))
+        free = (solid ^ pair.translate((0.0, 0.0, play - 0.03))).volume()
+        caught = caught and free < 1e-6                              # 遊びの中では板に当たらない
+        for one in pair.decompose():                                 # 向かい合う 2 本を 1 本ずつ
+            held = (solid ^ one.translate((0.0, 0.0, play + over))).volume()
+            hook = min(hook, held / (over * p.sw_clip_w))
+    return gap, hook, caught and hook > HOOK_MIN
 
 
 def holes(rep: Report, p: Params, stl: Path) -> None:
@@ -240,10 +390,16 @@ def holes(rep: Report, p: Params, stl: Path) -> None:
     rep.add(f"Choc V2 の爪の肩は、図面（CPG135301D03）でつばの下面から {p.sw_clip:.2f} mm 下にある。穴のふちは厚み "
             f"{p.clip_t:.2f} mm の平らな板で、その下は各辺の中央を幅 {p.clip_w:.1f} × 奥行き {p.clip_d:.1f} mm だけ"
             "外へ広げてある（爪の逃げ）。")
+    rep.add(f"音声入力キーは、スイッチを {p.voice_sink:.2f} mm 沈めてあり、残る板（プレートの下面まで）がそのまま厚み "
+            f"{p.plate_t - p.voice_sink:.2f} mm の爪を受ける板になる。板の厚みの寸法 clip_t を変えると、沈める量も変わる。")
     rep.add("STL を測った。穴は板の厚みの中ほど、板の厚みは逃げの真上、逃げは板の下面と逃げの天井の中ほどで測っている。")
     rep.add("「爪の肩から板まで」は、図面から起こした爪の形（幅 "
             f"{p.sw_clip_w:.1f}、出 {p.sw_clip_out:.1f} mm）を穴に置いて測ったすき間で、スイッチが上下に動ける量になる。")
-    rep.add("「引き上げると掛かる」は、その爪を遊びより 0.05 mm 多く引き上げると板に食い込むこと。"
+    rep.add("「爪が板に掛かる幅」は、その爪を遊びより 0.05 mm 多く引き上げたときに板に食い込む体積から出した、"
+            "爪が穴のふちより外へ出ている幅。向かい合う 2 本のうち狭いほうを書く。設計値は "
+            f"{p.sw_body / 2.0 + p.sw_clip_out - p.hole / 2.0:.3f} mm"
+            f"（爪の外の幅 {p.sw_body + 2 * p.sw_clip_out:.2f} mm と穴 {p.hole:.2f} mm の差の半分）。")
+    rep.add("「引き上げると掛かる」は、2 本とも板に掛かること。掛かる幅が 0（爪が穴のふちに届かない）なら不合格にする。"
             "スイッチをどの向きに挿しても掛かるよう、90° 回した向きでも確かめた。")
     rep.add()
     rows, worst = [], 0.0
@@ -264,8 +420,8 @@ def holes(rep: Report, p: Params, stl: Path) -> None:
                 rep.expect(False, f"{side} {key.name} の穴か、爪を受ける板が見つからない")
                 continue
             g = groups.setdefault(key.kind, {"n": 0, "u": [], "v": [], "ledge": [], "width": [], "depth": [],
-                                             "open": 0, "reliefs": 0, "need": 0, "gap": [], "caught": True,
-                                             "want": thick})
+                                             "open": 0, "reliefs": 0, "need": 0, "gap": [], "hook": [],
+                                             "caught": True, "want": thick})
             if z_top - thick > 0.05:
                 g["need"] += 4                                     # 板より下に肉がある穴は、4 辺に逃げが要る
             r = got["size"]
@@ -287,8 +443,9 @@ def holes(rep: Report, p: Params, stl: Path) -> None:
             for quarter in (0, 1):
                 latch = parts.place_on_key(p, key, parts.latch(p, quarter)).translate((0.0, 0.0, p.plate_t))
                 placed.append(latch if side == "left" else latch.mirror((1.0, 0.0, 0.0)))
-            gap, caught = latch_grip(m, placed, p.sw_clip - thick, p, p.hole)
+            gap, hook, caught = latch_grip(m, placed, p.sw_clip - thick, p)
             g["gap"].append(gap)
+            g["hook"].append(hook)
             g["caught"] = g["caught"] and caught
         for kind, g in groups.items():
             relief = "なし（板の下面で受ける）"
@@ -299,12 +456,13 @@ def holes(rep: Report, p: Params, stl: Path) -> None:
                 if g["open"]:
                     relief += f"（うち {g['open']} か所は外へ抜ける）"
             rows.append([JP[side], labels[kind], g["n"], span(g["u"]), span(g["v"]), span(g["ledge"]), relief,
-                         span(g["gap"]), "はい" if g["caught"] else "いいえ"])
+                         span(g["gap"]), span(g["hook"]), "はい" if g["caught"] else "いいえ"])
             rep.expect(max(abs(v - g["want"]) for v in g["ledge"]) < 0.01,
                        f"{side} {labels[kind]}：爪を受ける板の厚みが {span(g['ledge'])} mm（設計値 {g['want']:.2f}）")
             rep.expect(max(abs(v - (p.sw_clip - g["want"])) for v in g["gap"]) < 0.01,
                        f"{side} {labels[kind]}：爪の肩から板まで {span(g['gap'])} mm")
-            rep.expect(g["caught"], f"{side} {labels[kind]}：引き上げても爪が板に掛からない穴がある")
+            rep.expect(g["caught"], f"{side} {labels[kind]}：引き上げても爪が板に掛からない穴がある"
+                                    f"（爪が板に掛かる幅 {min(g['hook']):.3f} mm）")
             rep.expect(p.sw_clip - p.sw_height_tol - g["want"] > 1e-9,
                        f"{side} {labels[kind]}：板の厚み {g['want']:.2f} mm では、爪の肩が公差の下限"
                        f"（{p.sw_clip - p.sw_height_tol:.2f} mm）のスイッチで爪が開かない")
@@ -324,7 +482,7 @@ def holes(rep: Report, p: Params, stl: Path) -> None:
             if a is not None and b is not None:
                 pitches_u.append(float(b[0] - a[0]))
     rep.table(["側", "キー", "穴の数", "穴の幅 u（mm）", "穴の奥行き v（mm）", "爪を受ける板の厚み（mm）",
-               "爪の逃げ（mm）", "爪の肩から板まで（mm）", "引き上げると掛かる"], rows)
+               "爪の逃げ（mm）", "爪の肩から板まで（mm）", "爪が板に掛かる幅（mm）", "引き上げると掛かる"], rows)
     rep.add(f"穴の設計値からのずれは最大 {worst:.3f} mm。列のピッチは {span(pitches_u)} mm、"
             f"段のピッチは {span(pitches_v)} mm。")
     rep.add(f"爪の肩の寸法の公差は ±{p.sw_height_tol:.2f} mm で、下限の {p.sw_clip - p.sw_height_tol:.2f} mm でも"
@@ -350,15 +508,15 @@ def holes(rep: Report, p: Params, stl: Path) -> None:
             r = got["size"]
             key = Key("t", "alpha", centre[0], centre[1])
             placed = [parts.place_on_key(p, key, parts.latch(p, q)).translate((0.0, 0.0, p.plate_t)) for q in (0, 1)]
-            gap, caught = latch_grip(m, placed, p.sw_clip - thick, p, size)
+            gap, hook, caught = latch_grip(m, placed, p.sw_clip - thick, p)
             rows.append(["手前" if j == 0 else "奥", i + 1, f"{size:.2f}", f"{r[0] + r[2]:.2f} × {r[1] + r[3]:.2f}",
                          f"{thick:.2f}", span(got["ledge"]), f"{span(got['width'])} × {span(got['depth'])}",
-                         f"{gap:.2f}", "はい" if caught else "いいえ"])
+                         f"{gap:.2f}", f"{hook:.2f}", "はい" if caught else "いいえ"])
             rep.expect(abs(r[0] + r[2] - size) < 0.01 and abs(r[1] + r[3] - size) < 0.01
                        and max(abs(v - thick) for v in got["ledge"]) < 0.01 and caught,
                        f"fit_test.stl の穴（列 {j + 1}、刻み {i + 1}）が設計値と違う")
     rep.table(["列", "刻みの数", "穴の設計値（mm）", "測った穴（mm）", "板の厚みの設計値（mm）", "測った板の厚み（mm）",
-               "爪の逃げ 幅 × 奥行き（mm）", "爪の肩から板まで（mm）", "引き上げると掛かる"], rows)
+               "爪の逃げ 幅 × 奥行き（mm）", "爪の肩から板まで（mm）", "爪が板に掛かる幅（mm）", "引き上げると掛かる"], rows)
     rep.expect(len(rows) == len(sizes) * len(ledges), "fit_test.stl の穴の数が設計と違う")
 
 
@@ -435,20 +593,34 @@ def posture(rep: Report, p: Params, meshes: dict) -> None:
 
 # ---- 4. 当たり ------------------------------------------------------------------
 
+KEY_JP = {"space": "親指キー（Space）", "enter": "親指キー（Enter）", "thumb2": "親指キー（外側）", "voice": "音声入力キー"}
+
+
+def key_label(name: str) -> str:
+    """キーの呼び名。文字キーは、小指側から数えた列と、手前から数えた段。"""
+    if name in KEY_JP:
+        return KEY_JP[name]
+    col, row = name[1:].split("r")
+    return f"{int(col) + 1} 列めの {int(row) + 1} 段め"
+
+
 def clearances(rep: Report, p: Params) -> None:
     rep.add("## 部品どうしの当たり")
     rep.add()
     rep.add("組んだ位置での重なりの体積と、いちばん近い所のすき間。重なりが 0 なら食い込んでいない。")
     rep.add(f"キーキャップは印刷する場合の形（外形 {p.cap:.1f} mm 角）で確かめた。すき間 0.00 は、そこで触れて載っていることを表す。")
     rep.add(f"「公差の端」は、図面の公差のうちキャップにいちばん厳しい組み合わせ：ストローク {p.travel_max:.2f} mm"
-            f"（{p.sw_travel:.1f}＋{p.sw_travel_tol:.2f}）、ハウジングの高さ＋{p.sw_height_tol:.2f} mm。")
+            f"（{p.sw_travel:.1f}＋{p.sw_travel_tol:.2f}）、ハウジングの高さ＋{p.sw_height_tol:.2f} mm、"
+            f"キャップが座る軸の先端の高さ {p.stem_low:.2f} mm（{p.sw_stem:.2f}−{p.sw_stem_tol:.2f}）。"
+            "軸の先端が低いぶん、キャップも低い位置に座る。")
+    rep.add("スイッチの脚（電気の端子 2 本と、端子でない脚 1 本）は、挿せる 4 つの向きを重ねた形で確かめた。")
     rep.add()
     rows, spare = [], []
     for side in assembly.SIDES:
         jp = JP[side]
         rest = assembly.half(p, side, knurl=False)
         down = assembly.half(p, side, press=p.sw_travel, knurl=False)
-        edge = assembly.half(p, side, press=p.travel_max, knurl=False, tall=p.sw_height_tol)
+        edge = assembly.half(p, side, press=p.travel_max + p.sw_stem_tol, knurl=False, tall=p.sw_height_tol)
         lay = assembly.layout(p, side)
         rot, _trans = shell.frame(p, lay)
         push = rot @ np.array([0.0, 0.0, -1.0])
@@ -465,7 +637,10 @@ def clearances(rep: Report, p: Params) -> None:
         pairs = [
             ("押していないとき", "傾斜台 と プレート", base, rest["plate"], 0.0),
             ("押していないとき", "傾斜台 と スイッチの下ハウジング・中央の柱", base, rest["switch_lower"], 0.5),
-            ("押していないとき", "傾斜台 と スイッチの電気の端子", base, rest["switch_pins"], 0.5),
+            ("押していないとき", "傾斜台 と スイッチの電気の端子（4 つの向き）", base, rest["switch_pins"], 0.5),
+            ("押していないとき", "傾斜台 と スイッチの端子でない脚（4 つの向き）", base, rest["switch_leg"], 0.5),
+            ("押していないとき", "プレート と スイッチの脚（4 つの向き）", rest["plate"],
+             rest["switch_pins"] + rest["switch_leg"], 0.05),
             ("押していないとき", "プレート と スイッチの下ハウジング", rest["plate"], body_only, 0.05),
             ("押していないとき", "プレート と キーキャップ", rest["plate"], caps_of(rest), 0.3),
             ("押し切ったとき", "プレート と キーキャップ", rest["plate"], caps_of(down), 0.3),
@@ -513,8 +688,36 @@ def clearances(rep: Report, p: Params) -> None:
     rep.add("押し切ったキャップの下端がハウジングに当たるまでの残りは、キャップをさらに押し下げて測った。"
             f"公差の端でも {p.cap_margin:.2f} mm が残るように、キャップの下端の高さを決めている。")
     rep.add()
-    rep.table(["側", "キャップ", f"公称のストローク（{p.sw_travel:.1f} mm）で押し切ったあとの残り（mm）",
-               f"公差の端（{p.travel_max:.2f} mm、ハウジング＋{p.sw_height_tol:.2f} mm）で押し切ったあとの残り（mm）"], spare)
+    rep.table(["側", "キャップ", f"公称の寸法（ストローク {p.sw_travel:.1f} mm、軸の先端 {p.sw_stem:.2f} mm）で押し切ったあとの残り（mm）",
+               f"公差の端（ストローク {p.travel_max:.2f} mm、ハウジング＋{p.sw_height_tol:.2f} mm、軸の先端 {p.stem_low:.2f} mm）"
+               "で押し切ったあとの残り（mm）"], spare)
+
+    rep.add("配線のすき間。スイッチは 4 つの向きに挿せるので、向きごとに、脚から傾斜台（壁、底の隅の斜面、底の板）までの"
+            "いちばん狭い所を測った。向きは、スイッチのまん中寄りの端子が来る側で呼ぶ。配線に使えるのは、電気の端子のまわりのすき間：")
+    rep.add()
+    rows, tight = [], {}
+    for side in assembly.SIDES:
+        lay = assembly.layout(p, side)
+        base = assembly.base_world(p, side)
+        for q in parts.QUARTERS:
+            pins, leg = parts.legs(p, q, mirror=side == "right")
+            best = {}
+            for label, shape in (("pins", pins), ("leg", leg)):
+                gaps = {key.name: base.min_gap(shell.to_world(p, lay, parts.place_on_key(p, key, shape)), 20.0)
+                        for key in lay.keys}
+                name = min(gaps, key=gaps.get)
+                best[label] = (gaps[name], name)
+                if label not in tight or gaps[name] < tight[label][0]:
+                    tight[label] = (gaps[name], JP[side], name, QUARTER_JP[q])
+            rows.append([JP[side], f"{QUARTER_JP[q]}（{90 * q}°）", f"{best['pins'][0]:.2f}", key_label(best["pins"][1]),
+                         f"{best['leg'][0]:.2f}", key_label(best["leg"][1])])
+    rep.table(["側", "挿す向き", "電気の端子から傾斜台まで（mm）", "いちばん近いキー",
+               "端子でない脚から傾斜台まで（mm）", "いちばん近いキー"], rows)
+    g, jp, name, q = tight["pins"]
+    rep.add(f"電気の端子から傾斜台までのすき間は、いちばん狭い向きで {g:.2f} mm（{jp}、{key_label(name)}、まん中寄りの端子が"
+            f"{q}に来る向き）。端子でない脚は {tight['leg'][0]:.2f} mm（{tight['leg'][1]}、{key_label(tight['leg'][2])}、"
+            f"{tight['leg'][3]}の向き）。")
+    rep.add()
 
     lay = assembly.layout(p, "left")
     if lay.wheel is not None:
@@ -551,7 +754,7 @@ def clearances(rep: Report, p: Params) -> None:
 def insertion(rep: Report, p: Params) -> None:
     rep.add("## プレートを差し込む向き")
     rep.add()
-    rep.add("スイッチ、ホイール、球を付けたプレートを、載せる位置から離して、傾斜台と重なる体積を見た。")
+    rep.add("スイッチ（脚は 4 つの向きを重ねた形）、ホイール、球を付けたプレートを、載せる位置から離して、傾斜台と重なる体積を見た。")
     rep.add("傾斜面（キー面）に垂直な向きなら、どの距離でも重ならない。真上へ持ち上げると、プレートの差し込み部が、"
             "寝ている壁（キー面が高い側の壁）に食い込む。")
     rep.add()
@@ -561,7 +764,7 @@ def insertion(rep: Report, p: Params) -> None:
         lay = assembly.layout(p, side)
         half = assembly.half(p, side, knurl=False)
         base = half["base"] + half["foot"]
-        moving = half["plate"] + half["switch_lower"] + half["switch_pins"]
+        moving = half["plate"] + half["switch_lower"] + half["switch_pins"] + half["switch_leg"]
         for extra in ("wheel", "ball"):
             if extra in half:
                 moving += half[extra]
@@ -607,8 +810,9 @@ def _force(value: float) -> str:
 def tipping(rep: Report, p: Params) -> None:
     rep.add("## 倒れにくさの目安")
     rep.add()
-    rep.add("キーを、キー面に垂直に押したとする。押す力の向きを机まで延ばした点が支えの内側にあれば、")
+    rep.add("各キーの中央を、キー面に垂直に押したとする。押す力の向きを机まで延ばした点が支えの内側にあれば、")
     rep.add("どれだけ強く押しても倒れない。外側にあるときは、支えの縁を支点にして倒れ始める力を出した。")
+    rep.add("押す位置がキーの中央からずれると、力の向きが机に届く点もずれる。キャップの縁を押した場合は、下の別の表に書く。")
     rep.add(f"支えは、傾斜台の底の目印（輪の溝）に貼った平らなゴム足 4 枚（直径 {p.pad_d:g} mm、厚み {p.pad_h:g} mm）とした。"
             f"ゴム足の縁は台の縁から {p.pad_edge:g} mm 内側に来る。ゴム足の厚みのぶんケースが浮き、"
             "力の向きが机に届く点はそのぶん、キー面が高い側へずれる。")
@@ -628,20 +832,34 @@ def tipping(rep: Report, p: Params) -> None:
         for key in assembly.layout(p, side).keys:
             if key.kind == "alpha":
                 continue
-            label = {"space": "親指キー（Space）", "enter": "親指キー（Enter）", "thumb2": "親指キー（外側）",
-                     "voice": "音声入力キー"}[key.name]
-            rows.append([jp, label, f"{st.landing[key.name]:.1f}" if st.landing[key.name] > 0 else "内側",
+            rows.append([jp, KEY_JP[key.name], f"{st.landing[key.name]:.1f}" if st.landing[key.name] > 0 else "内側",
                          _force(st.tip_force[key.name])])
         worst = min(st.tip_force.values())
-        rep.expect(worst > 4.0, f"{side}: {worst:.1f} N で倒れ始める")
+        rep.expect(worst > 4.0, f"{side}: 各キーの中央を押して、{worst:.1f} N で倒れ始める")
         notes.append(f"{jp}：重さの見積もり {st.mass:.0f} g、重心は外側の手前の角から {st.cg[0]:.1f} mm 内側、"
                      f"{st.cg[1] - assembly.layout(p, side).v_front:.1f} mm 奥、底から {st.cg[2]:.1f} mm の高さ。")
-    rep.table(["側", "キー（列は小指側から数える）", "力の向きが支えの外に出る量（mm）", "倒れ始める力"], rows)
+    rep.table(["側", "キー（列は小指側から数える）", "力の向きが支えの外に出る量（mm）",
+               "倒れ始める力（各キーの中央を押した場合）"], rows)
     for note in notes:
         rep.add(note)
     rep.add()
 
-    rep.add("ゴム足の貼り方を変えたとき（いちばん倒れやすいキー）：")
+    rep.add("押す位置を変えたとき（いちばん倒れやすいキー。ゴム足は上と同じ）。「キャップの縁」は、キャップの四隅と"
+            "各辺のまん中のうち、いちばん倒れやすい所を押した場合：")
+    rep.add()
+    rows = []
+    for label, spot in (("各キーの中央", "centre"), ("キャップの縁", "rim")):
+        cells = []
+        for side in assembly.SIDES:
+            st = analysis.stability(p, side, spot=spot)
+            worst = min(st.tip_force, key=st.tip_force.get)
+            cells += [key_label(worst) if st.landing[worst] > 0 else "なし",
+                      f"{st.landing[worst]:.1f}" if st.landing[worst] > 0 else "内側", _force(st.tip_force[worst])]
+        rows.append([label] + cells)
+    rep.table(["押す位置", "左：いちばん倒れやすいキー", "左：支えの外に出る量（mm）", "左：倒れ始める力",
+               "右：いちばん倒れやすいキー", "右：支えの外に出る量（mm）", "右：倒れ始める力"], rows)
+
+    rep.add("ゴム足の貼り方を変えたとき（いちばん倒れやすいキー。各キーの中央を押した場合）：")
     rep.add()
     rows = []
     for label, support in ((f"平らなゴム足（直径 {p.pad_d:g}、厚み {p.pad_h:g} mm）を目印の位置に貼る", "pads"),
@@ -664,17 +882,17 @@ def tipping(rep: Report, p: Params) -> None:
             continue
         seen.append((t, sl))
         q = p.with_(tilt=t, slope=sl)
-        st = analysis.stability(q, "left")
-        leans = shell.wall_leans(q, assembly.layout(q, "left"))
+        lay = assembly.layout(q, "left")
+        st, rim = analysis.stability(q, "left"), analysis.stability(q, "left", spot="rim")
+        leans = shell.wall_leans(q, lay)
         bb = assembly.base_world(q, "left").bounding_box()
-        top = shell.world_point(q, assembly.layout(q, "left"), (assembly.layout(q, "left").u_in,
-                                                              assembly.layout(q, "left").v_back, q.top))[2]
+        top = max(shell.world_point(q, lay, (lay.u_in, v, q.top))[2] for v in (lay.v_front, lay.v_back))
         rows.append([f"左右 {t:g}°、前後 {sl:g}°" + ("（この一式）" if (t, sl) == (p.tilt, p.slope) else ""),
                      f"{shell.steepest(q):.1f}°", f"{leans['cheek']:.0f}°", f"{leans['back']:.0f}°",
-                     f"{bb[3] - bb[0]:.0f} × {bb[4] - bb[1]:.0f}", f"{max(top, shell.world_point(q, assembly.layout(q, 'left'), (assembly.layout(q, 'left').u_in, assembly.layout(q, 'left').v_front, q.top))[2]):.0f}",
-                     _force(min(st.tip_force.values()))])
+                     f"{bb[3] - bb[0]:.0f} × {bb[4] - bb[1]:.0f}", f"{top:.0f}",
+                     _force(min(st.tip_force.values())), _force(min(rim.tip_force.values()))])
     rep.table(["姿勢", "合わせた傾き", "内側の壁の寝かせ", "奥の壁の寝かせ", "足もとの幅 × 奥行き（mm）",
-               "上面のいちばん高い角（mm）", "倒れ始める力"], rows)
+               "上面のいちばん高い角（mm）", "倒れ始める力（各キーの中央）", "倒れ始める力（キャップの縁）"], rows)
 
 
 def main() -> None:
@@ -684,17 +902,19 @@ def main() -> None:
     ap.add_argument("--slope", type=float, help="この前後の傾きで出した傾斜台を確かめる")
     ap.add_argument("--report", type=Path, help="表を書くファイル（既定は使い捨ての置き場）")
     args = ap.parse_args()
-    stl = args.stl.expanduser()
+    stl = args.stl.expanduser().resolve()
     tag = manifest.posture_tag(args.tilt, args.slope)
     report = args.report or workdir.scratch(f"check-report{tag}.md")
 
-    p_plate, p, files = manifest.load_set(stl, args.tilt, args.slope)
+    p_plate, p, files = manifest.load_set(stl, args.tilt, args.slope)     # 古い記録や別の版なら、ここで知らせて止まる
     rep = Report()
-    rep.add(f"確かめた場所は `{stl}`。寸法は `{manifest.NAME}` の記録から読んだ：プレートの一式は{manifest.describe(p_plate)}、"
-            f"傾斜台の姿勢は左右 {p.tilt:g}°、前後 {p.slope:g}°。")
+    rep.add(f"確かめた場所は `{stl}`。寸法は `{manifest.NAME}` の記録から読んだ：モデルの版は {MODEL}、"
+            f"プレートの一式は{manifest.describe(p_plate)}、傾斜台の姿勢は左右 {p.tilt:g}°、前後 {p.slope:g}°。")
+    rep.add(f"一式の指紋（部品 10 個の STL のハッシュをまとめたもの）は `{manifest.fingerprint(stl, files)}`。"
+            "estimate.py の出力と同じなら、同じ一式を見ている。")
     rep.add()
     meshes = shapes(rep, stl, files, p_plate, p)
-    assembled(rep, p)
+    assembled(rep, p, stl, files)
     holes(rep, p, stl)
     posture(rep, p, meshes)
     clearances(rep, p)
