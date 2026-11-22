@@ -22,11 +22,11 @@
   },
   "left_base.stl": {
    "params": {},
-   "sha256": "17a25742e152d6831bab47a929c9725d5281f78cf4aa29af92b2df76ccf9c32d"
+   "sha256": "d585db24ea47fd5b492e30a17b847dede1904b4b41cbd212b006266885f9c51e"
   },
   "left_plate.stl": {
    "params": {},
-   "sha256": "8b2cb9da0b5f773f0683ce017e2ef2984a9c4da7b38059fe77b32fc1c18e6320"
+   "sha256": "a985edeaecafa97ac862fb08a859e22d0799ec07fa0c2c7970df450b074b72cc"
   },
   "left_wheel.stl": {
    "params": {},
@@ -34,11 +34,11 @@
   },
   "right_base.stl": {
    "params": {},
-   "sha256": "e6629fda56af18dec87e8f689eebd360af7f17777f015b17ece49517ec6db15f"
+   "sha256": "3ab50ea380981d1d8dd8bd7f56002c3ed28360659055905a9e487a4a2a7d73d4"
   },
   "right_plate.stl": {
    "params": {},
-   "sha256": "2ba2cf5a0b1a4bdfeed862eff51cbc3d195e5e36e545ff18a3f1765de8f1533e"
+   "sha256": "575c875a38b9859218402a6b2d326841a481e476e81e80a4dd50dcf05a4126dc"
   }
  }
 }

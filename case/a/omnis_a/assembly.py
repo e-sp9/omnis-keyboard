@@ -28,10 +28,12 @@ def base_world(p: Params, side: str) -> Manifold:
     return shell.base(p, layout(p, side))
 
 
-def half(p: Params, side: str, press: float = 0.0, knurl: bool = True, tall: float = 0.0) -> dict[str, Manifold]:
+def half(p: Params, side: str, press: float = 0.0, knurl: bool = True, tall: float = 0.0,
+         look: bool = False) -> dict[str, Manifold]:
     """片手ぶんの部品（机の座標、内側が +x）。
 
     press はキーの押し込み量、tall はスイッチの上のハウジングの高さに足す量（公差の端を見るとき）。
+    look を渡すと、キーキャップをプレビュー用の丸みのある形にする（検査には使わない）。
     """
     lay = layout(p, side)
 
@@ -40,7 +42,7 @@ def half(p: Params, side: str, press: float = 0.0, knurl: bool = True, tall: flo
 
     out: dict[str, Manifold] = {"plate": world(plate_deck(p, side))}
     base = base_world(p, side)
-    upper, lower = base.split_by_plane((0.0, 0.0, 1.0), p.foot_h)
+    upper, lower = base.split_by_plane((0.0, 0.0, 1.0), p.floor_top)     # 底の板から下が、黒くする台
     out["base"] = upper
     out["foot"] = lower
 
@@ -48,7 +50,7 @@ def half(p: Params, side: str, press: float = 0.0, knurl: bool = True, tall: flo
     sw_u, sw_l, sw_p = parts.switch(p, tall)
     stem = parts.stem(p, press)
     for key in lay.keys:
-        cap = parts.place_on_key(p, key, parts.keycap(p, key), press)
+        cap = parts.place_on_key(p, key, parts.keycap_look(p, key) if look else parts.keycap(p, key), press)
         if key.kind == "voice":
             voice = cap
         else:
@@ -78,8 +80,3 @@ def half(p: Params, side: str, press: float = 0.0, knurl: bool = True, tall: flo
     else:
         out["ball"] = world(parts.ball_in_place(p, lay))
     return out
-
-
-def footprint_x(p: Params, side: str) -> tuple[float, float]:
-    bb = base_world(p, side).bounding_box()
-    return bb[0], bb[3]

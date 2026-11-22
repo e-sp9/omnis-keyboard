@@ -1,11 +1,11 @@
 """STL と、組んだ形を確かめて表にする。
 
-    .venv/bin/python check.py                      # stl/ の一式
-    .venv/bin/python check.py --tilt 48            # 傾斜台を left_base_tilt48.stl などに替えて確かめる
-    .venv/bin/python check.py --stl ~/omnis-ball27  # 別の場所に出した一式
+    .venv/bin/python check.py                       # stl/ の一式
+    .venv/bin/python check.py --tilt 20 --slope 0   # 傾斜台を left_base_tilt20_slope0.stl などに替えて確かめる
+    .venv/bin/python check.py --stl ~/omnis-hole142  # 別の場所に出した一式
 
 寸法は既定値ではなく、STL と同じ場所の build.json（build.py が書く、作ったときの寸法の記録）から読む。
-確かめること：STL が記録どおりの寸法の形か、閉じた形か、外寸、スイッチ穴と爪の掛かり、傾き、
+確かめること：STL が記録どおりの寸法の形か、閉じた形か、外寸、スイッチ穴と爪の掛かり、姿勢と壁の向き、
 部品どうしの当たり、プレートを差し込む向き、支えなしで印刷できるか、倒れにくさ。
 どれかが設計値から外れていたら終了コード 1 で終わる。表は画面に出し、使い捨ての置き場にも書く。
 """
@@ -33,6 +33,7 @@ PRINTED = manifest.PARTS
 JP = {"left": "左", "right": "右"}
 BRIDGE_MAX = 10.0       # 支えなしで渡してよい橋の長さ（mm）
 CANTILEVER_MAX = 0.8    # 支えなしで張り出してよい量（mm）。0.42 mm の線 2 本ぶんまで
+RIM_MIN = 0.7           # プレートの差し込み部の側面に残す壁の厚み（mm）
 
 
 class Report:
@@ -115,7 +116,7 @@ def assembled(rep: Report, p: Params) -> None:
             bb = m.bounding_box()
             rows.append([JP[side], label, f"{bb[3] - bb[0]:.1f}", f"{bb[4] - bb[1]:.1f}", f"{bb[5]:.1f}"])
     rep.table(["側", "範囲", "幅 X（mm）", "奥行き Y（mm）", "高さ Z（mm）"], rows)
-    rep.add("底は足と同じ厚みの板で閉じている。開口は奥の壁のケーブルの窓だけ：")
+    rep.add(f"底は厚さ {p.floor_top:.1f} mm の板で閉じている。開口は奥の壁のケーブルの窓だけ：")
     rep.add()
     rows = []
     for side in assembly.SIDES:
@@ -128,12 +129,30 @@ def assembled(rep: Report, p: Params) -> None:
         window = shell.cable_window(p, lay) ^ shell.body(p, lay)
         bb = window.bounding_box()
         rows.append([JP[side], f"{closed_area:.0f}", holes, f"{floor.area() - marks.area():.0f}",
-                     f"{bb[3] - bb[0]:.1f} × {bb[5] - bb[2]:.1f}", f"{bb[2] - p.foot_h:.1f}"])
+                     f"{bb[3] - bb[0]:.1f} × {bb[5] - bb[2]:.1f}", f"{bb[2] - p.floor_top:.1f}"])
         rep.expect(holes == 0, f"{side} の傾斜台の底に穴がある")
         rep.expect(abs((bb[3] - bb[0]) - p.cable_w) < 0.01 and abs((bb[5] - bb[2]) - p.cable_h) < 0.01,
                    f"{side} のケーブルの窓が設計値と違う")
-    rep.table(["側", "底の板の面積（mm²）", "底を貫く穴の数", "ゴム足の目印の溝の面積（mm²）",
-               "ケーブルの窓 幅 × 高さ（mm）", "底の上面から窓の下端まで（mm）"], rows)
+    rep.table(["側", "底の台の面積（mm²）", "底を貫く穴の数", "ゴム足の目印の溝の面積（mm²）",
+               "ケーブルの窓 幅 × 高さ（mm）", "底の板の上面から窓の下端まで（mm）"], rows)
+    rep.add("プレートの差し込み部の側面と、スイッチ穴、爪の逃げ、キーのくぼみ、球の穴、ホイールの窓の間に残る壁の、"
+            f"いちばん薄い所の厚みも測った。{RIM_MIN:.1f} mm 以上あればよいとした：")
+    rep.add()
+    rows = []
+    for side in assembly.SIDES:
+        lay = assembly.layout(p, side)
+        plug, deck = shell.plug_solid(p, lay), assembly.plate_deck(p, side)
+        lo, hi = 0.0, 3.0                      # 側面から内へ、どこまで肉が途切れずに続くか
+        for _ in range(14):
+            mid = (lo + hi) / 2.0
+            if ((plug - shell.plug_solid(p, lay, shrink=mid)) - deck).volume() > 0.02:
+                hi = mid
+            else:
+                lo = mid
+        opened = sum(len(plate_mod.open_sides(p, key, plug)) for key in lay.keys)
+        rows.append([JP[side], f"{lo:.2f}", opened])
+        rep.expect(lo >= RIM_MIN - 0.005 or opened > 0, f"{side} のプレートで、差し込み部の側面の壁が {lo:.2f} mm しかない")
+    rep.table(["側", "いちばん薄い壁の厚み（mm）", "側面まで抜いた爪の逃げの数"], rows)
 
 
 def _signed_area(poly: np.ndarray) -> float:
@@ -343,63 +362,75 @@ def holes(rep: Report, p: Params, stl: Path) -> None:
     rep.expect(len(rows) == len(sizes) * len(ledges), "fit_test.stl の穴の数が設計と違う")
 
 
-# ---- 3. 傾き --------------------------------------------------------------------
+# ---- 3. 姿勢 --------------------------------------------------------------------
 
-def _wall_top_edge(mesh: trimesh.Trimesh, normal_y: float, inward: float) -> tuple[np.ndarray, np.ndarray]:
-    """手前（normal_y = -1）か奥（+1）の壁の外面で、内側へ向かって上がるいちばん長い縁。
-
-    プレートが載る面は、この縁でそれぞれの壁の外面と交わる。
-    """
-    y_wall = mesh.bounds[0][1] if normal_y < 0 else mesh.bounds[1][1]
-    faces = np.flatnonzero((np.abs(mesh.face_normals[:, 1] - normal_y) < 1e-6)
-                           & (np.abs(mesh.triangles_center[:, 1] - y_wall) < 1e-3))
-    edges = np.sort(mesh.faces[faces][:, [[0, 1], [1, 2], [2, 0]]].reshape(-1, 2), axis=1)
-    uniq, counts = np.unique(edges, axis=0, return_counts=True)
-    best = None
-    for a, b in mesh.vertices[uniq[counts == 1]]:
-        if (b[0] - a[0]) * inward < 0:
-            a, b = b, a
-        run, rise = abs(b[0] - a[0]), b[2] - a[2]
-        if run < 1e-6 or rise / run < 0.05:
-            continue
-        length = math.hypot(run, rise)
-        if best is None or length > best[0]:
-            best = (length, a, b)
-    return best[1], best[2]
+def _wall_faces(mesh: trimesh.Trimesh, normal: np.ndarray, offset: float) -> np.ndarray:
+    """メッシュの面のうち、決めた平面（外向きの単位ベクトル normal、normal·点 = offset）の上にあるもの。"""
+    on_plane = np.abs(mesh.triangles_center @ normal - offset) < 2e-3
+    return np.flatnonzero((mesh.face_normals @ normal > 0.99999) & on_plane)
 
 
-def tilt(rep: Report, p: Params, meshes: dict) -> None:
-    rep.add("## 傾き")
+def _top_edge(mesh: trimesh.Trimesh, faces: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """壁の面の上の縁の両端（低い方、高い方）。いちばん高い頂点と、そこから離れた側でいちばん高い頂点。"""
+    pts = mesh.vertices[np.unique(mesh.faces[faces])]
+    high = pts[pts[:, 2].argmax()]
+    far = pts[np.linalg.norm(pts[:, :2] - high[:2], axis=1) > 0.6 * np.ptp(pts[:, :2], axis=0).max()]
+    return far[far[:, 2].argmax()], high
+
+
+def _rise(a: np.ndarray, b: np.ndarray) -> float:
+    return math.degrees(math.atan2(b[2] - a[2], math.hypot(b[0] - a[0], b[1] - a[1])))
+
+
+def posture(rep: Report, p: Params, meshes: dict) -> None:
+    rep.add("## 姿勢と壁の向き")
     rep.add()
-    rep.add("傾斜台の STL で、プレートが載る面が手前と奥の壁の外面と交わる縁を測った。")
-    rep.add(f"内側の壁は、外面の向きを測った。設計値は傾き {p.tilt:.1f}°、内側の壁の寝かせ {p.lean:.1f}°（垂直から）。")
+    rep.add("傾斜台の STL を測った。プレートが載る面は、手前の壁の上の縁と外側の壁の上の縁を通る。")
+    rep.add("手前の壁の上の縁が水平から上がる角度が左右の傾き、外側の壁の上の縁が上がる角度が前後の傾き。")
+    rep.add("合わせた傾きは、その 2 本の縁が張る面と水平のなす角。壁の寝かせは、壁の外面と鉛直のなす角。")
+    rep.add(f"設計値は左右 {p.tilt:.1f}°、前後 {p.slope:.1f}°、合わせて {shell.steepest(p):.1f}°。")
     rep.add()
     rows = []
     for side in assembly.SIDES:
         mesh = meshes[f"{side}_base"]
-        inward = 1.0 if side == "left" else -1.0
-        a0, b0 = _wall_top_edge(mesh, -1.0, inward)
-        a1, b1 = _wall_top_edge(mesh, 1.0, inward)
-        front = math.degrees(math.atan2(b0[2] - a0[2], abs(b0[0] - a0[0])))
-        back = math.degrees(math.atan2(b1[2] - a1[2], abs(b1[0] - a1[0])))
-        # 同じ x での高さを手前と奥で比べる。差がなければ前後には傾いていない。
-        z_back = a1[2] + (b1[2] - a1[2]) * (a0[0] - a1[0]) / (b1[0] - a1[0])
-        fore_aft = math.degrees(math.atan2(z_back - a0[2], abs(a1[1] - a0[1])))
-
-        n, area = mesh.face_normals, mesh.area_faces
-        cand = np.flatnonzero((n[:, 0] * inward > 0.3) & (np.abs(n[:, 1]) < 1e-6) & (n[:, 2] > 0.05))
-        groups: dict[tuple, float] = {}
-        for i in cand:
-            key = tuple(np.round(n[i], 4))
-            groups[key] = groups.get(key, 0.0) + float(area[i])
-        wall = max(groups, key=groups.get)
-        lean = math.degrees(math.asin(wall[2]))
-        rows.append([JP[side], f"{front:.2f}°", f"{back:.2f}°", f"{abs(fore_aft):.2f}°", f"{lean:.2f}°"])
-        rep.expect(abs(front - p.tilt) < 0.02 and abs(back - p.tilt) < 0.02,
-                   f"{side} の傾斜台の傾きが {front:.2f}°／{back:.2f}°")
-        rep.expect(abs(fore_aft) < 0.02, f"{side} の傾斜台が前後に {fore_aft:.2f}° 傾いている")
-        rep.expect(abs(lean - p.lean) < 0.02, f"{side} の傾斜台の内側の壁の寝かせが {lean:.2f}°")
-    rep.table(["側", "手前の縁の傾き", "奥の縁の傾き", "前後の傾き", "内側の壁の寝かせ（垂直から）"], rows)
+        lay = assembly.layout(p, side)
+        rot, trans = shell.frame(p, lay)
+        want = shell.wall_leans(p, lay)
+        flip = np.array([1.0 if side == "left" else -1.0, 1.0, 1.0])
+        found, lean = {}, {}
+        for name, pl in shell.walls(p, lay):
+            if name not in shell.MAINS:
+                continue
+            world = pl.moved(rot, trans)
+            faces = _wall_faces(mesh, world.n * flip, world.d)
+            if len(faces) == 0:
+                rep.expect(False, f"{side} の傾斜台で、{name} の壁の面が見つからない")
+                continue
+            found[name] = faces
+            normal = (mesh.face_normals[faces] * mesh.area_faces[faces][:, None]).sum(axis=0)
+            lean[name] = math.degrees(math.asin(normal[2] / np.linalg.norm(normal)))
+        if not all(k in found for k in ("front", "outer", "cheek", "back")):
+            continue
+        a0, b0 = _top_edge(mesh, found["front"])
+        a1, b1 = _top_edge(mesh, found["outer"])
+        tilt, slope = _rise(a0, b0), _rise(a1, b1)
+        normal = np.cross(b0 - a0, b1 - a1)
+        both = math.degrees(math.acos(abs(normal[2]) / np.linalg.norm(normal)))
+        rows.append([JP[side], f"{tilt:.2f}°", f"{slope:.2f}°", f"{both:.2f}°", f"{lean['front']:.2f}°",
+                     f"{lean['outer']:.2f}°", f"{lean['cheek']:.2f}°", f"{lean['back']:.2f}°"])
+        rep.expect(abs(tilt - p.tilt) < 0.02 and abs(slope - p.slope) < 0.02,
+                   f"{side} の傾斜台の姿勢が、左右 {tilt:.2f}°、前後 {slope:.2f}°")
+        rep.expect(abs(both - shell.steepest(p)) < 0.02, f"{side} の傾斜台の合わせた傾きが {both:.2f}°")
+        rep.expect(all(abs(lean[k] - want[k]) < 0.02 for k in lean),
+                   f"{side} の傾斜台の壁の寝かせが設計値と違う")
+    rep.table(["側", "左右の傾き", "前後の傾き", "合わせた傾き", "手前の壁の寝かせ", "外側の壁の寝かせ",
+               "内側の壁の寝かせ", "奥の壁の寝かせ"], rows)
+    lay = assembly.layout(p, "left")
+    corners = {"外側の手前": (lay.u_out, lay.v_front), "内側の手前": (lay.u_in, lay.v_front),
+               "内側の奥": (lay.u_in, lay.v_back), "外側の奥": (lay.u_out, lay.v_back)}
+    rep.add("上面の四隅が机から上がる高さ（面取りをする前の角の位置）："
+            + "、".join(f"{k} {shell.world_point(p, lay, (u, v, p.top))[2]:.1f} mm" for k, (u, v) in corners.items()) + "。")
+    rep.add()
 
 
 # ---- 4. 当たり ------------------------------------------------------------------
@@ -521,8 +552,8 @@ def insertion(rep: Report, p: Params) -> None:
     rep.add("## プレートを差し込む向き")
     rep.add()
     rep.add("スイッチ、ホイール、球を付けたプレートを、載せる位置から離して、傾斜台と重なる体積を見た。")
-    rep.add("傾斜面（キー面）に垂直な向きなら、どの距離でも重ならない。真上へ持ち上げると、プレートの差し込み部が"
-            "傾斜台の内側の壁に食い込む。")
+    rep.add("傾斜面（キー面）に垂直な向きなら、どの距離でも重ならない。真上へ持ち上げると、プレートの差し込み部が、"
+            "寝ている壁（キー面が高い側の壁）に食い込む。")
     rep.add()
     lifts = (0.5, 1.0, 2.0, 5.0, 10.0, 20.0)
     rows = []
@@ -579,8 +610,8 @@ def tipping(rep: Report, p: Params) -> None:
     rep.add("キーを、キー面に垂直に押したとする。押す力の向きを机まで延ばした点が支えの内側にあれば、")
     rep.add("どれだけ強く押しても倒れない。外側にあるときは、支えの縁を支点にして倒れ始める力を出した。")
     rep.add(f"支えは、傾斜台の底の目印（輪の溝）に貼った平らなゴム足 4 枚（直径 {p.pad_d:g} mm、厚み {p.pad_h:g} mm）とした。"
-            f"ゴム足の縁は足の縁から {p.pad_edge:g} mm 内側に来る。ゴム足の厚みのぶんケースが浮き、"
-            "力の向きが机に届く点はそのぶん内側へずれる。")
+            f"ゴム足の縁は台の縁から {p.pad_edge:g} mm 内側に来る。ゴム足の厚みのぶんケースが浮き、"
+            "力の向きが机に届く点はそのぶん、キー面が高い側へずれる。")
     rep.add(f"重さは、印刷物を PLA（1.24 g/cm³）の体積に、スライスした重さとの比（プレート "
             f"{analysis.FILL['plate']}、傾斜台 {analysis.FILL['base']}）を掛け、スイッチを 1 個 "
             f"{analysis.SWITCH_G} g として見積もった。")
@@ -603,69 +634,69 @@ def tipping(rep: Report, p: Params) -> None:
                          _force(st.tip_force[key.name])])
         worst = min(st.tip_force.values())
         rep.expect(worst > 4.0, f"{side}: {worst:.1f} N で倒れ始める")
-        notes.append(f"{jp}：重さの見積もり {st.mass:.0f} g、重心は外側の端から {st.cg[0]:.1f} mm 内側、"
-                     f"底から {st.cg[2]:.1f} mm の高さ。")
+        notes.append(f"{jp}：重さの見積もり {st.mass:.0f} g、重心は外側の手前の角から {st.cg[0]:.1f} mm 内側、"
+                     f"{st.cg[1] - assembly.layout(p, side).v_front:.1f} mm 奥、底から {st.cg[2]:.1f} mm の高さ。")
     rep.table(["側", "キー（列は小指側から数える）", "力の向きが支えの外に出る量（mm）", "倒れ始める力"], rows)
     for note in notes:
         rep.add(note)
     rep.add()
 
-    rep.add("ゴム足の貼り方を変えたとき（いちばん倒れやすい内側の列）：")
+    rep.add("ゴム足の貼り方を変えたとき（いちばん倒れやすいキー）：")
     rep.add()
     rows = []
     for label, support in ((f"平らなゴム足（直径 {p.pad_d:g}、厚み {p.pad_h:g} mm）を目印の位置に貼る", "pads"),
                            ("同じ位置に、中心だけで机に触れるゴム足（半球形など）を貼る", "centres"),
-                           ("ゴム足を貼らず、足をじかに机に置く", "foot")):
+                           ("ゴム足を貼らず、台をじかに机に置く", "foot")):
         cells = []
         for side in assembly.SIDES:
             st = analysis.stability(p, side, support)
             worst = min(st.tip_force, key=st.tip_force.get)
-            cells += [f"{st.landing[worst]:.1f}", f"{st.tip_force[worst]:.1f} N"]
+            cells += [f"{st.landing[worst]:.1f}" if st.landing[worst] > 0 else "内側", _force(st.tip_force[worst])]
         rows.append([label] + cells)
     rep.table(["支え", "左：支えの外に出る量（mm）", "左：倒れ始める力", "右：支えの外に出る量（mm）", "右：倒れ始める力"], rows)
 
-    rep.add("内側の壁の寝かせ方を変えたとき（左、いちばん倒れやすい内側の列。ゴム足は上と同じ）：")
+    rep.add("傾斜台だけを別の姿勢で作ったとき（プレートは同じ。左、ゴム足は上と同じ）：")
     rep.add()
     rows = []
-    for lean in (9.0, 15.0, 20.0, 25.0, p.lean_nominal, 32.0):
-        st = analysis.stability(p.with_(lean_nominal=lean), "left")
-        worst = min(st.tip_force.values())
-        rows.append([f"{lean:.0f}°" + ("（この一式）" if lean == p.lean_nominal else ""),
-                     f"{st.foot_x[1] - st.foot_x[0]:.0f}", f"{worst:.1f} N"])
-    rep.table(["内側の壁の寝かせ", "ゴム足の外側から内側までの幅（mm）", "倒れ始める力"], rows)
-
-    rep.add("傾きを変えたとき（内側の壁の寝かせは傾きと一緒に増える）：")
-    rep.add()
-    rows = []
-    for t in sorted({38.0, 43.0, 48.0, 50.0, 55.0, p.tilt}):
-        q = p.with_(tilt=t)
+    seen = []
+    for t, sl in ((p.tilt, p.slope), (20.0, 0.0), (43.0, 0.0)):
+        if (t, sl) in seen:
+            continue
+        seen.append((t, sl))
+        q = p.with_(tilt=t, slope=sl)
         st = analysis.stability(q, "left")
+        leans = shell.wall_leans(q, assembly.layout(q, "left"))
         bb = assembly.base_world(q, "left").bounding_box()
-        rows.append([f"{t:g}°" + ("（この一式）" if t == p.tilt else ""), f"{q.lean:g}°",
-                     f"{bb[3] - bb[0]:.0f} × {bb[4] - bb[1]:.0f} × {bb[5]:.0f}",
-                     f"{min(st.tip_force.values()):.1f} N"])
-    rep.table(["傾き", "内側の壁の寝かせ", "傾斜台の外寸（mm）", "倒れ始める力"], rows)
+        top = shell.world_point(q, assembly.layout(q, "left"), (assembly.layout(q, "left").u_in,
+                                                              assembly.layout(q, "left").v_back, q.top))[2]
+        rows.append([f"左右 {t:g}°、前後 {sl:g}°" + ("（この一式）" if (t, sl) == (p.tilt, p.slope) else ""),
+                     f"{shell.steepest(q):.1f}°", f"{leans['cheek']:.0f}°", f"{leans['back']:.0f}°",
+                     f"{bb[3] - bb[0]:.0f} × {bb[4] - bb[1]:.0f}", f"{max(top, shell.world_point(q, assembly.layout(q, 'left'), (assembly.layout(q, 'left').u_in, assembly.layout(q, 'left').v_front, q.top))[2]):.0f}",
+                     _force(min(st.tip_force.values()))])
+    rep.table(["姿勢", "合わせた傾き", "内側の壁の寝かせ", "奥の壁の寝かせ", "足もとの幅 × 奥行き（mm）",
+               "上面のいちばん高い角（mm）", "倒れ始める力"], rows)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--stl", type=Path, default=HERE / "stl", help="STL と build.json のある場所")
-    ap.add_argument("--tilt", type=float, help="この傾きで出した傾斜台（left_base_tilt48.stl など）を確かめる")
+    ap.add_argument("--tilt", type=float, help="この左右の傾きで出した傾斜台（left_base_tilt20_slope0.stl など）を確かめる")
+    ap.add_argument("--slope", type=float, help="この前後の傾きで出した傾斜台を確かめる")
     ap.add_argument("--report", type=Path, help="表を書くファイル（既定は使い捨ての置き場）")
     args = ap.parse_args()
     stl = args.stl.expanduser()
-    tag = manifest.tilt_tag(args.tilt) if args.tilt is not None else ""
+    tag = manifest.posture_tag(args.tilt, args.slope)
     report = args.report or workdir.scratch(f"check-report{tag}.md")
 
-    p_plate, p, files = manifest.load_set(stl, args.tilt)
+    p_plate, p, files = manifest.load_set(stl, args.tilt, args.slope)
     rep = Report()
     rep.add(f"確かめた場所は `{stl}`。寸法は `{manifest.NAME}` の記録から読んだ：プレートの一式は{manifest.describe(p_plate)}、"
-            f"傾斜台は傾き {p.tilt:g}°。")
+            f"傾斜台の姿勢は左右 {p.tilt:g}°、前後 {p.slope:g}°。")
     rep.add()
     meshes = shapes(rep, stl, files, p_plate, p)
     assembled(rep, p)
     holes(rep, p, stl)
-    tilt(rep, p, meshes)
+    posture(rep, p, meshes)
     clearances(rep, p)
     insertion(rep, p)
     printing(rep, meshes, files)
@@ -680,11 +711,11 @@ def main() -> None:
             rep.add(f"- {f}")
     else:
         rep.add("すべての項目が設計値どおりだった。")
-    others = [t for t in manifest.tilts(stl) if t != tag]
+    others = [t for t in manifest.variants(stl) if t != tag]
     if others:
         rep.add()
-        rep.add("この場所には、傾きだけ変えた傾斜台もある。確かめるには "
-                + "、".join(f"`check.py --tilt {t.removeprefix('_tilt').replace('p', '.')}`" for t in others) + "。")
+        rep.add("この場所には、姿勢だけ変えた傾斜台もある。確かめるには "
+                + "、".join(f"`check.py {manifest.tag_options(t)}`" for t in others) + "。")
     text = "\n".join(rep.lines) + "\n"
     print(text)
     report.parent.mkdir(parents=True, exist_ok=True)

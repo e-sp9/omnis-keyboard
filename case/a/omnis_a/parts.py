@@ -78,6 +78,49 @@ def keycap_printable(p: Params, key: Key) -> Manifold:
     return geom.move(keycap(p, key), geom.rot_x(180.0), np.array([0.0, 0.0, z1]))
 
 
+# プレビューだけに使う、丸みのあるキーキャップの形（スイッチが載る面からの高さ、mm）
+LOOK = {
+    "alpha": dict(top=12.2, taper=2.2, fillet=0.9, corner=1.7, dish=0.35),
+    "thumb": dict(top=12.2, taper=2.2, fillet=0.9, corner=1.7, dish=0.3),
+    "voice": dict(top=9.0, taper=1.2, fillet=0.6, corner=1.4, dish=0.0),
+}
+
+
+def keycap_look(p: Params, key: Key) -> Manifold:
+    """プレビュー用のキーキャップ。参考画像に近い、角と縁を丸めた形。印刷用の形（keycap）とは別。
+
+    下端の高さと外形は印刷用と同じ。側面は少し絞り、上の縁を丸め、上面を浅い円筒面でくぼませる。
+    中は詰まっていて、当たりの検査には使わない。
+    """
+    look = LOOK[key.kind]
+    w, d = key.cap_w, key.cap_d
+    z0, _z1 = cap_heights(p, key)
+    z1, taper, rho = look["top"], look["taper"], look["fillet"]
+    band = min(0.8, (z1 - z0) / 4.0)
+    # 斜めの側面と、上の縁の丸み（半径 rho）が滑らかにつながる角度を求める
+    tip = 0.3
+    for _ in range(30):
+        tx, tz = taper - rho * math.cos(tip), z1 - rho + rho * math.sin(tip)
+        tip = math.atan2(tx, tz - (z0 + band))
+    profile = [(0.0, z0), (0.0, z0 + band)]
+    steps = 10
+    for i in range(steps + 1):
+        a = tip + (math.pi / 2.0 - tip) * i / steps
+        profile.append((taper - rho * math.cos(a), z1 - rho + rho * math.sin(a)))
+    rings = [(_rounded(w - 2 * inset, d - 2 * inset, look["corner"] + 0.35 * inset), z) for inset, z in profile]
+    body = None
+    for low, high in zip(rings[:-1], rings[1:]):
+        piece = _stack([low, high])
+        body = piece if body is None else body + piece
+    if look["dish"] > 0:
+        half = (w - 2 * taper) / 2.0
+        radius = (half * half + look["dish"] ** 2) / (2.0 * look["dish"])
+        scoop = Manifold.cylinder(d + 4.0, radius, radius, 256).translate((0.0, 0.0, -(d + 4.0) / 2.0))
+        scoop = geom.move(scoop, geom.rot_x(90.0), np.array([0.0, 0.0, z1 - look["dish"] + radius]))
+        body -= scoop
+    return body
+
+
 def place_on_key(p: Params, key: Key, m: Manifold, press: float = 0.0) -> Manifold:
     """キーの位置へ置く（キー面の座標）。press は押し込み量。"""
     return geom.move(m, geom.rot_z(key.rot), np.array([key.u, key.v, -key.sink - press]))

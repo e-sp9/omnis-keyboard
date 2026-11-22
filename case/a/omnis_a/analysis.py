@@ -15,7 +15,7 @@ SWITCH_G = 1.8       # Choc V2 1個のおおよその重さ
 BALL_DENSITY = 1.35e-3
 # 印刷物は中が粗く埋まるので、体積から出した重さより軽い。BambuStudio の見積もり
 # （0.20mm Standard、壁 2 本、充填 15%）と体積の比から決めた。
-FILL = {"plate": 0.67, "base": 0.87, "foot": 0.87}
+FILL = {"plate": 0.67, "base": 0.83, "foot": 0.83}
 
 
 def centroid(manifold) -> tuple[np.ndarray, float]:
@@ -54,7 +54,7 @@ def support_polygon(p: Params, lay, support: str = "pads") -> tuple[np.ndarray, 
 
     pads     平らなゴム足を目印の位置に貼ったとき。支点はゴム足の縁
     centres  半球形のゴム足など、中心だけで机に触れるものを同じ位置に貼ったとき
-    foot     ゴム足を貼らず、足をじかに机に置いたとき。支点は足の縁
+    foot     ゴム足を貼らず、底の台をじかに机に置いたとき。支点は台の縁
     """
     if support == "foot":
         return geom.polygons(shell.foot_outline(p, lay))[0], 0.0

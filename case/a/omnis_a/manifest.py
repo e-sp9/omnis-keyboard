@@ -51,9 +51,14 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def tilt_tag(tilt: float) -> str:
-    """傾斜台だけを別の傾きで出したときの、ファイル名の末尾。"""
-    return f"_tilt{tilt:g}".replace(".", "p")
+def posture_tag(tilt: float | None = None, slope: float | None = None) -> str:
+    """傾斜台だけを別の姿勢で出したときの、ファイル名の末尾（_tilt20_slope0 など）。"""
+    tag = ""
+    if tilt is not None:
+        tag += f"_tilt{tilt:g}"
+    if slope is not None:
+        tag += f"_slope{slope:g}"
+    return tag.replace(".", "p")
 
 
 def read(folder: Path) -> dict:
@@ -88,24 +93,35 @@ def intact(folder: Path, name: str) -> bool:
     return entry is not None and entry.get("sha256") == digest(folder / name)
 
 
-def tilts(folder: Path) -> list[str]:
-    """その場所にある、傾きだけ変えた傾斜台の末尾（_tilt48 など）。"""
+def variants(folder: Path) -> list[str]:
+    """その場所にある、姿勢だけ変えた傾斜台の末尾（_tilt20_slope0 など）。"""
     out = set()
     for name in read(folder):
         stem = name.removesuffix(".stl")
-        if "_base_tilt" in stem:
-            out.add(stem.split("_base", 1)[1])
+        if "_base_" in stem:
+            out.add("_" + stem.split("_base_", 1)[1])
     return sorted(out)
 
 
-def load_set(folder: Path, tilt: float | None = None) -> tuple[Params, Params, dict]:
+def tag_options(tag: str) -> str:
+    """末尾から、同じ傾斜台を選ぶためのオプション（--tilt 20 --slope 0 など）を作る。"""
+    words = []
+    for part in tag.strip("_").split("_"):
+        for key in ("tilt", "slope"):
+            if part.startswith(key):
+                words.append(f"--{key} {part[len(key):].replace('p', '.')}")
+    return " ".join(words)
+
+
+def load_set(folder: Path, tilt: float | None = None, slope: float | None = None) -> tuple[Params, Params, dict]:
     """その場所の一式を作ったときの寸法。
 
-    返すのは、プレートの一式の寸法、傾斜台の寸法（傾きだけが違うことがある）、
-    部品の名前 -> ファイルの名前。tilt を渡すと、傾斜台は left_base_tilt48.stl などを使う。
-    部品どうしの寸法が食い違っていたら、組めないので止まる。
+    返すのは、プレートの一式の寸法、傾斜台の寸法（姿勢だけが違うことがある）、
+    部品の名前 -> ファイルの名前。tilt や slope を渡すと、傾斜台はその姿勢で出したもの
+    （left_base_tilt20_slope0.stl など）を使う。部品どうしの寸法が食い違っていたら、
+    組めないので止まる。
     """
-    tag = tilt_tag(tilt) if tilt is not None else ""
+    tag = posture_tag(tilt, slope)
     files = {name: f"{name}{tag if name in BASES else ''}.stl" for name in PARTS}
     found = {name: params_of(folder, files[name]) for name in PARTS}
     p_plate = found["left_plate"]
@@ -116,9 +132,10 @@ def load_set(folder: Path, tilt: float | None = None) -> tuple[Params, Params, d
     p = found["left_base"]
     if found["right_base"] != p:
         raise SystemExit("左右の傾斜台が別の寸法で作られています。build.py で出し直してください。")
-    if tilt is not None and abs(p.tilt - tilt) > 1e-9:
-        raise SystemExit(f"{files['left_base']} の記録の傾きが {p.tilt:g}° です。build.py --tilt {tilt:g} で出し直してください。")
-    if p_plate.with_(tilt=p.tilt) != p:
+    if (tilt is not None and abs(p.tilt - tilt) > 1e-9) or (slope is not None and abs(p.slope - slope) > 1e-9):
+        raise SystemExit(f"{files['left_base']} の記録の姿勢が、左右 {p.tilt:g}°、前後 {p.slope:g}° です。"
+                         "build.py で出し直してください。")
+    if p_plate.with_(tilt=p.tilt, slope=p.slope) != p:
         raise SystemExit(f"プレート（{describe(p_plate)}）と傾斜台（{describe(p)}）が"
                          "別の寸法で作られています。同じ寸法で出し直してください。")
     return p_plate, p, files
