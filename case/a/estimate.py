@@ -5,9 +5,10 @@
     .venv/bin/python estimate.py --tilt 20 --slope 0   # 傾斜台を left_base_tilt20_slope0.stl などに替えて
     .venv/bin/python estimate.py --stl ~/omnis-hole142  # 別の場所に出した一式
 
-スライスするのは、STL と同じ場所の build.json（build.py が書く記録）に登録された一式の部品だけ。
-check.py と同じ決まりで一式を選ぶので、記録のない STL や、別の寸法・別の版で作った部品が
-混じっていれば、そう知らせて止まる。build.py が書いたあとで中身が変わった STL も見積もらない。
+スライスするのは、STL と同じ場所の build.json（build.py が書く記録）に登録された一式の部品
+（10 個）だけ。check.py と同じ決まりで一式を選ぶ。一式の部品のどれかに記録がない、別の寸法や
+別の版で作ってある、build.py が書いたあとで中身が変わっている、のどれかなら、そう知らせて
+止まる。同じフォルダーにそれ以外の STL があっても、読まない（止まりもしない）。
 出力の「一式の指紋」が check.py のものと同じなら、検査した一式と同じものを見積もっている。
 
 スライスするだけで、プリンターには何も送らない。BambuStudio の設定フォルダは読むだけにし、
@@ -117,12 +118,8 @@ def main() -> None:
     work = (args.work or workdir.scratch("estimate")).expanduser().resolve()
     out_json = (args.json or workdir.scratch(f"estimate{tag}.json")).expanduser().resolve()
 
-    # 登録された一式だけを選ぶ。古い記録、別の版、寸法の食い違いは、ここで知らせて止まる
-    _p_plate, p, files = manifest.load_set(stl, args.tilt, args.slope)
-    changed = manifest.changed(stl, files)
-    if changed:
-        raise SystemExit(f"{'、'.join(changed)} は、build.py が書いたあとで中身が変わっています"
-                         f"（{manifest.NAME} のハッシュと合わない）。build.py で出し直してください。")
+    # 登録された一式だけを選ぶ。古い記録、別の版、寸法の食い違い、中身が変わった STL は、ここで知らせて止まる
+    _p_plate, p, files = manifest.load_intact_set(stl, args.tilt, args.slope)
     todo = [name for name in ORDER if not args.only or args.only in files[name]]
     if not todo:
         raise SystemExit(f"名前に「{args.only}」を含む部品はありません。あるのは: {'、'.join(files[n] for n in ORDER)}")

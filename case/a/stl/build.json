@@ -1,8 +1,8 @@
 {
  "format": 2,
  "sets": {
-  "441c399456": {
-   "model": "A-2.1",
+  "e6ec141f85": {
+   "model": "A-2.2",
    "params": {
     "tilt": 7.0,
     "slope": 18.0,
@@ -77,6 +77,7 @@
     "space_w": 1.75,
     "enter_w": 1.25,
     "voice_cap": 14.0,
+    "voice_sink": 1.8,
     "voice_u": -1.0,
     "v_front": -41.9,
     "space_at": [
@@ -115,14 +116,15 @@
     "ball_ring": 2.2,
     "ball_ring_depth": 1.3,
     "ball_seat_deg": 60.0,
-    "cap_skirt": 4.75,
+    "layer": 0.2,
+    "cap_skirt": 4.8,
     "cap_margin": 0.25,
-    "cap_top": 10.5,
+    "cap_top": 10.6,
     "cap_taper": 1.7,
     "cap_wall": 0.9,
     "cap_roof": 1.4,
     "cap_round": 1.6,
-    "voice_cap_h": 2.1,
+    "voice_cap_h": 2.0,
     "stem_post": 5.3,
     "stem_slot": [
      4.15,
@@ -134,43 +136,43 @@
  },
  "files": {
   "fit_test.stl": {
-   "set": "441c399456",
+   "set": "e6ec141f85",
    "sha256": "313e511165654df0c2ee0f54b83ab48cd73f548e2e0346f6fe847b074f03604b"
   },
   "keycap_1u.stl": {
-   "set": "441c399456",
-   "sha256": "3644ca6b6d61c2e84f27025370389b5b44d9ebb7655db84e9038cd2e3f585a49"
+   "set": "e6ec141f85",
+   "sha256": "1b0d374243d93f43f4ead4a582cf1ba11f8e497a56ec1028a730e2fbc4f0312b"
   },
   "keycap_enter.stl": {
-   "set": "441c399456",
-   "sha256": "e43cbac3040e9b9271bbe61e6745c8cd773ff8fda4fe7bf3297efa4ea8e236a9"
+   "set": "e6ec141f85",
+   "sha256": "802b93fa3e11301d62e397a4b2b8fcba66f6db1c5472f697c409774cf3834c6f"
   },
   "keycap_space.stl": {
-   "set": "441c399456",
-   "sha256": "6b92ac570168467a51ea7f547182a66946f8f6c44e19d9e00e6926a5507e04d8"
+   "set": "e6ec141f85",
+   "sha256": "e228ba116b6bcb67a5cab0ef3a19fd4cba0011996dfec2d4c62c6efa075911cd"
   },
   "keycap_voice.stl": {
-   "set": "441c399456",
-   "sha256": "d1933a52223eaf530c317c93562a28d4e3ebe16c069321d988331567463a0b47"
+   "set": "e6ec141f85",
+   "sha256": "b5f958139eba8dcaaf7a5f1092aee7426d4dfb946305984e1d523a69f0a0fcce"
   },
   "left_base.stl": {
-   "set": "441c399456",
+   "set": "e6ec141f85",
    "sha256": "63876a24c26d514e66790791caf5b4bec0d0dae8b72adbc60fa7f5eaac9fa4d5"
   },
   "left_plate.stl": {
-   "set": "441c399456",
+   "set": "e6ec141f85",
    "sha256": "9635d602bbf687360fbdb7df82c3c5f0ee5157122e1365ec73a35da39d7bbd7f"
   },
   "left_wheel.stl": {
-   "set": "441c399456",
+   "set": "e6ec141f85",
    "sha256": "7de39eb83829a5156cefec774a29271a3bf0bcf6a7630303b6f1863bb9073b0e"
   },
   "right_base.stl": {
-   "set": "441c399456",
+   "set": "e6ec141f85",
    "sha256": "2dbf65f4e8248f50727498d7e26e06f18c072535c641556d5726d12ce0ba0802"
   },
   "right_plate.stl": {
-   "set": "441c399456",
+   "set": "e6ec141f85",
    "sha256": "280db07578524e832179b49515e4f0276cfc8679015d80116a1b19e231dbbb72"
   }
  }

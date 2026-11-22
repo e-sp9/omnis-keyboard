@@ -224,3 +224,18 @@ def load_set(folder: Path, tilt: float | None = None, slope: float | None = None
 def changed(folder: Path, files: dict[str, str]) -> list[str]:
     """一式のうち、build.py が書いたあとで中身が変わった STL。"""
     return [name for name in files.values() if not intact(folder, name)]
+
+
+def load_intact_set(folder: Path, tilt: float | None = None, slope: float | None = None) -> tuple[Params, Params, dict]:
+    """load_set と同じ。ただし、STL の中身が記録のハッシュと合うことも確かめる。
+
+    build.json を残したまま STL だけを差し替えた一式は、記録の寸法と実物が合わない。
+    描画や見積もりは、そういう一式を記録の寸法のまま扱わないよう、ここで知らせて止まる。
+    """
+    p_plate, p, files = load_set(folder, tilt, slope)
+    bad = changed(folder, files)
+    if bad:
+        raise SystemExit(f"{folder} の {'、'.join(bad)} は、build.py が書いたあとで中身が変わっています"
+                         f"（{NAME} に記録されたハッシュと合わない）。記録の寸法と同じ形か分からないので、"
+                         "build.py で出し直してください。")
+    return p_plate, p, files

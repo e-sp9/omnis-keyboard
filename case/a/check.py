@@ -8,7 +8,8 @@
 から読む。古い形式の記録や、別の版のコードで作った STL は、同じ形を作り直せないので、確かめる前に
 そう知らせて止まる。
 確かめること：STL が記録どおりの寸法の形か、閉じた形か、外寸、底の台と上面の角の形、スイッチ穴と爪の掛かり、
-姿勢と壁の向き、部品どうしの当たり、プレートを差し込む向き、支えなしで印刷できるか、倒れにくさ。
+姿勢と壁の向き、部品どうしの当たり（キャップを押し切ったときの余裕は、STL を積層に切った形でも測る）、
+プレートを差し込む向き、支えなしで印刷できるか、倒れにくさ。
 どれかが設計値から外れていたら終了コード 1 で終わる。表は画面に出し、使い捨ての置き場にも書く。
 """
 
@@ -37,6 +38,8 @@ BRIDGE_MAX = 10.0       # 支えなしで渡してよい橋の長さ（mm）
 CANTILEVER_MAX = 0.8    # 支えなしで張り出してよい量（mm）。0.42 mm の線 2 本ぶんまで
 RIM_MIN = 0.7           # プレートの差し込み部の側面に残す壁の厚み（mm）
 HOOK_MIN = 0.005        # 爪が板に掛かる幅がこれ以下なら、届いていないとみなす（mm）
+TOL = 1e-4              # 余裕を測るときの、測り方の細かさ（mm）。これより大きい不足は不合格にする
+GAP_TOL = 1e-3          # すき間を測るときの、形の座標の丸めぶん（mm）
 KINK_MAX = 10.0         # 上面の外周で許す折れ角（度）。丸めた角は、これより細かい折れの並びになる
 QUARTER_JP = ("奥", "外側", "手前", "内側")     # 挿す向き 0〜3 で、まん中寄りの端子が来る側
 
@@ -390,9 +393,14 @@ def holes(rep: Report, p: Params, stl: Path) -> None:
     rep.add(f"Choc V2 の爪の肩は、図面（CPG135301D03）でつばの下面から {p.sw_clip:.2f} mm 下にある。穴のふちは厚み "
             f"{p.clip_t:.2f} mm の平らな板で、その下は各辺の中央を幅 {p.clip_w:.1f} × 奥行き {p.clip_d:.1f} mm だけ"
             "外へ広げてある（爪の逃げ）。")
-    rep.add(f"音声入力キーは、スイッチを {p.voice_sink:.2f} mm 沈めてあり、残る板（プレートの下面まで）がそのまま厚み "
-            f"{p.plate_t - p.voice_sink:.2f} mm の爪を受ける板になる。板の厚みの寸法 clip_t を変えると、沈める量も変わる。")
-    rep.add("STL を測った。穴は板の厚みの中ほど、板の厚みは逃げの真上、逃げは板の下面と逃げの天井の中ほどで測っている。")
+    rest = p.plate_t - p.voice_sink
+    rep.add(f"音声入力キーは、スイッチを {p.voice_sink:.2f} mm 沈めてある。スイッチが載る面からプレートの下面までの残りは "
+            f"{rest:.2f} mm。" + (f"板の厚み clip_t（{p.clip_t:.2f} mm）のほうが薄いので、差の {rest - p.clip_t:.2f} mm だけ"
+                                  "下面から逃げを彫ってある。" if rest - p.clip_t > 0.05 else
+                                  "これが板の厚み clip_t 以下なので、逃げは彫らず、板の下面がそのまま爪を受ける。")
+            + "clip_t を変えても、スイッチが載る面は動かさない。")
+    rep.add("STL を測った。穴は板の厚みの中ほど、板の厚みは逃げの真上、逃げは板の下面と逃げの天井の中ほどで測っている。"
+            "「スイッチが載る面」は、板の上面を見つけた高さ（設計値の高さに板の上面がなければ、不合格になる）。")
     rep.add("「爪の肩から板まで」は、図面から起こした爪の形（幅 "
             f"{p.sw_clip_w:.1f}、出 {p.sw_clip_out:.1f} mm）を穴に置いて測ったすき間で、スイッチが上下に動ける量になる。")
     rep.add("「爪が板に掛かる幅」は、その爪を遊びより 0.05 mm 多く引き上げたときに板に食い込む体積から出した、"
@@ -421,7 +429,7 @@ def holes(rep: Report, p: Params, stl: Path) -> None:
                 continue
             g = groups.setdefault(key.kind, {"n": 0, "u": [], "v": [], "ledge": [], "width": [], "depth": [],
                                              "open": 0, "reliefs": 0, "need": 0, "gap": [], "hook": [],
-                                             "caught": True, "want": thick})
+                                             "caught": True, "want": thick, "seat": z_top})
             if z_top - thick > 0.05:
                 g["need"] += 4                                     # 板より下に肉がある穴は、4 辺に逃げが要る
             r = got["size"]
@@ -455,8 +463,8 @@ def holes(rep: Report, p: Params, stl: Path) -> None:
                     relief += f"、奥行き {span(g['depth'])}"
                 if g["open"]:
                     relief += f"（うち {g['open']} か所は外へ抜ける）"
-            rows.append([JP[side], labels[kind], g["n"], span(g["u"]), span(g["v"]), span(g["ledge"]), relief,
-                         span(g["gap"]), span(g["hook"]), "はい" if g["caught"] else "いいえ"])
+            rows.append([JP[side], labels[kind], g["n"], span(g["u"]), span(g["v"]), f"{g['seat']:.2f}",
+                         span(g["ledge"]), relief, span(g["gap"]), span(g["hook"]), "はい" if g["caught"] else "いいえ"])
             rep.expect(max(abs(v - g["want"]) for v in g["ledge"]) < 0.01,
                        f"{side} {labels[kind]}：爪を受ける板の厚みが {span(g['ledge'])} mm（設計値 {g['want']:.2f}）")
             rep.expect(max(abs(v - (p.sw_clip - g["want"])) for v in g["gap"]) < 0.01,
@@ -481,8 +489,9 @@ def holes(rep: Report, p: Params, stl: Path) -> None:
             a, b = centres.get(f"c{c}r0"), centres.get(f"c{c + 1}r0")
             if a is not None and b is not None:
                 pitches_u.append(float(b[0] - a[0]))
-    rep.table(["側", "キー", "穴の数", "穴の幅 u（mm）", "穴の奥行き v（mm）", "爪を受ける板の厚み（mm）",
-               "爪の逃げ（mm）", "爪の肩から板まで（mm）", "爪が板に掛かる幅（mm）", "引き上げると掛かる"], rows)
+    rep.table(["側", "キー", "穴の数", "穴の幅 u（mm）", "穴の奥行き v（mm）", "スイッチが載る面（プレートの下面から、mm）",
+               "爪を受ける板の厚み（mm）", "爪の逃げ（mm）", "爪の肩から板まで（mm）", "爪が板に掛かる幅（mm）",
+               "引き上げると掛かる"], rows)
     rep.add(f"穴の設計値からのずれは最大 {worst:.3f} mm。列のピッチは {span(pitches_u)} mm、"
             f"段のピッチは {span(pitches_v)} mm。")
     rep.add(f"爪の肩の寸法の公差は ±{p.sw_height_tol:.2f} mm で、下限の {p.sw_clip - p.sw_height_tol:.2f} mm でも"
@@ -604,7 +613,38 @@ def key_label(name: str) -> str:
     return f"{int(col) + 1} 列めの {int(row) + 1} 段め"
 
 
-def clearances(rep: Report, p: Params) -> None:
+def as_printed(solid: Manifold, layer: float) -> Manifold:
+    """印刷する向きの形を、スライサーが切るとおりの層の重なりに直した形。
+
+    スライサーは、層ごとに、その層のまん中の高さで形を切った断面を、層の厚みぶん積む。
+    面が層の途中にあると、刷り上がりでは、その面が上か下の層の境目へずれる。
+    面がちょうど層のまん中の高さにあるときは、まん中のすぐ下で切ったのと同じ結果になる
+    （BambuStudio 2.9.1 が出した G-code の層と突き合わせて確かめた）ので、ここでもそう切る。
+    """
+    bb = solid.bounding_box()
+    out = None
+    for i in range(math.ceil((bb[5] - bb[2]) / layer - 1e-6)):
+        cs = solid.slice(bb[2] + (i + 0.5) * layer - 1e-4)
+        if cs.area() < 1e-9:
+            continue
+        slab = cs.extrude(layer).translate((0.0, 0.0, bb[2] + i * layer))
+        out = slab if out is None else out + slab
+    return out
+
+
+def cap_stl(key) -> str:
+    """そのキーに付ける印刷用のキャップの部品の名前。"""
+    if key.kind == "voice":
+        return "keycap_voice"
+    return {"space": "keycap_space", "enter": "keycap_enter"}.get(key.name, "keycap_1u")
+
+
+def off_grid(value: float, layer: float) -> float:
+    """高さが、積層の境目（layer の整数倍）からどれだけ外れているか。"""
+    return abs(value - round(value / layer) * layer)
+
+
+def clearances(rep: Report, p: Params, stl: Path, files: dict) -> None:
     rep.add("## 部品どうしの当たり")
     rep.add()
     rep.add("組んだ位置での重なりの体積と、いちばん近い所のすき間。重なりが 0 なら食い込んでいない。")
@@ -616,6 +656,10 @@ def clearances(rep: Report, p: Params) -> None:
     rep.add("スイッチの脚（電気の端子 2 本と、端子でない脚 1 本）は、挿せる 4 つの向きを重ねた形で確かめた。")
     rep.add()
     rows, spare = [], []
+    printed = {}                                      # 印刷用のキャップの STL を、積層に切った形に直したもの
+    for name in ("keycap_1u", "keycap_space", "keycap_enter", "keycap_voice"):
+        _mesh, cap = load_manifold(stl / files[name])
+        printed[name] = as_printed(cap, p.layer)
     for side in assembly.SIDES:
         jp = JP[side]
         rest = assembly.half(p, side, knurl=False)
@@ -649,22 +693,36 @@ def clearances(rep: Report, p: Params) -> None:
             ("公差の端で押し切ったとき", "スイッチのハウジング と キーキャップ", edge["switch_upper"], caps_of(edge), 0.2),
         ]
         # 押し切った位置から、キャップがハウジングに当たるまでに、あとどれだけ下がれるか
+        def spare_travel(housing: Manifold, caps: Manifold) -> float:
+            lo, hi = 0.0, 3.0
+            for _ in range(26):
+                mid = (lo + hi) / 2.0
+                if (housing ^ caps.translate(tuple(push * mid))).volume() > 1e-7:
+                    hi = mid
+                else:
+                    lo = mid
+            return hi                                  # 当たり始める位置（測り方の細かさは 3 / 2^26 mm）
+
+        # STL を積層に切った形のキャップを、公差の端で押し切った位置に置く
+        sliced = {"caps": None, "voice_cap": None}
+        for key in lay.keys:
+            _z0, z1 = parts.cap_heights(p, key)
+            cap = geom.move(printed[cap_stl(key)], geom.rot_x(180.0), np.array([0.0, 0.0, z1]))   # 印刷の向きから戻す
+            cap = parts.place_on_key(p, key, cap, p.travel_max + p.sw_stem_tol)
+            group = "voice_cap" if key.kind == "voice" else "caps"
+            sliced[group] = cap if sliced[group] is None else sliced[group] + cap
         for label, group in (("文字キーと親指キーのキャップ", "caps"), ("音声入力キーのキャップ", "voice_cap")):
             if group not in rest:
                 continue
-            cells = []
-            for half in (down, edge):
-                lo, hi = 0.0, 3.0
-                for _ in range(22):
-                    mid = (lo + hi) / 2.0
-                    if (half["switch_upper"] ^ half[group].translate(tuple(push * mid))).volume() > 1e-7:
-                        hi = mid
-                    else:
-                        lo = mid
-                cells.append(lo)
-            spare.append([jp, label, f"{cells[0]:.2f}", f"{cells[1]:.2f}"])
-            rep.expect(cells[1] >= p.cap_margin - 0.011,
-                       f"{side}: {label}は、公差の端のスイッチを押し切ると、ハウジングまで {cells[1]:.2f} mm しか残らない")
+            cells = [spare_travel(half["switch_upper"], half[group]) for half in (down, edge)]
+            cells.append(spare_travel(edge["switch_upper"], shell.to_world(p, lay, sliced[group])))
+            spare.append([jp, label] + [f"{c:.3f}" for c in cells])
+            rep.expect(cells[1] >= p.cap_margin - TOL,
+                       f"{side}: {label}は、公差の端のスイッチを押し切ると、ハウジングまで {cells[1]:.3f} mm しか残らない"
+                       f"（要るのは {p.cap_margin:.2f} mm 以上）")
+            rep.expect(cells[2] >= p.cap_margin - TOL,
+                       f"{side}: {label}は、STL を {p.layer:.2f} mm の積層に切った形では、公差の端のスイッチを押し切ると、"
+                       f"ハウジングまで {cells[2]:.3f} mm しか残らない（要るのは {p.cap_margin:.2f} mm 以上）")
         if "wheel" in rest:
             pairs += [
                 ("押していないとき", "プレート と ホイール（窓のまん中）", rest["plate"], rest["wheel"], p.wheel_play),
@@ -682,15 +740,40 @@ def clearances(rep: Report, p: Params) -> None:
             gap = a.min_gap(b, 10.0)
             rows.append([jp, state, label, f"{overlap:.3f}", f"{gap:.2f}"])
             rep.expect(overlap < 0.05, f"{side}: {label}（{state}）が {overlap:.3f} mm³ 重なっている")
-            rep.expect(gap >= need - 0.011, f"{side}: {label}（{state}）のすき間が {gap:.2f} mm")
+            rep.expect(gap >= need - GAP_TOL, f"{side}: {label}（{state}）のすき間が {gap:.3f} mm（要るのは {need:.2f} mm 以上）")
     rep.table(["側", "状態", "組み合わせ", "重なり（mm³）", "すき間（mm）"], rows)
     rep.add("上の表の「スイッチのハウジング と キーキャップ」は、キャップの内側の角とハウジングの角の、横のすき間。")
     rep.add("押し切ったキャップの下端がハウジングに当たるまでの残りは、キャップをさらに押し下げて測った。"
-            f"公差の端でも {p.cap_margin:.2f} mm が残るように、キャップの下端の高さを決めている。")
+            f"公差の端でも {p.cap_margin:.2f} mm 以上が残るように、キャップの下端の高さを決めている。"
+            f"{p.cap_margin:.2f} mm に少しでも足りなければ不合格にする（測り方の細かさ {TOL:g} mm までは見ない）。")
+    rep.add(f"キャップは上面を造形面に置いて、{p.layer:.2f} mm の積層で印刷する。スライサーは層のまん中の高さで形を切るので、"
+            "面が層の途中にあると、刷り上がりは 1 層ぶん丸められる。右の列は、印刷用のキャップの STL を、その切り方で"
+            "層の重なりに直した形で測った残り。")
     rep.add()
     rep.table(["側", "キャップ", f"公称の寸法（ストローク {p.sw_travel:.1f} mm、軸の先端 {p.sw_stem:.2f} mm）で押し切ったあとの残り（mm）",
                f"公差の端（ストローク {p.travel_max:.2f} mm、ハウジング＋{p.sw_height_tol:.2f} mm、軸の先端 {p.stem_low:.2f} mm）"
-               "で押し切ったあとの残り（mm）"], spare)
+               "で押し切ったあとの残り（mm）", f"同じ公差の端で、STL を {p.layer:.2f} mm の積層に切った形での残り（mm）"], spare)
+    rep.add("キャップの、印刷の向きに効く面の高さ（上面を造形面に置いたときの、造形面からの高さ）。どれも積層の境目に"
+            "載っていれば、刷り上がりの高さは STL と同じになる：")
+    rep.add()
+    rows_grid = []
+    seen = set()
+    for side in assembly.SIDES:
+        for key in assembly.layout(p, side).keys:
+            name = cap_stl(key)
+            if name in seen:
+                continue
+            seen.add(name)
+            z0, z1 = parts.cap_heights(p, key)
+            faces = {"下端": z1 - z0, "十字の穴の底": z1 - p.sw_stem, "筒の先": z1 - (p.sw_stem - p.stem_depth),
+                     "天井の下面": p.cap_roof}
+            worst = max(off_grid(v, p.layer) for v in faces.values())
+            rows_grid.append([f"`{files[name]}`"] + [f"{v:.2f}" for v in faces.values()]
+                             + ["はい" if worst < 1e-6 else f"いいえ（{worst:.2f} mm ずれている）"])
+            rep.expect(worst < 1e-6, f"{files[name]}：印刷の向きに効く面が、{p.layer:.2f} mm の積層の境目から {worst:.2f} mm "
+                                     "ずれている（刷り上がりの余裕が、スライサーの丸め方で変わる）")
+    rep.table(["ファイル", "下端（mm）", "十字の穴の底（mm）", "筒の先（mm）", "天井の下面（mm）", "積層の境目に載っているか"],
+              rows_grid)
 
     rep.add("配線のすき間。スイッチは 4 つの向きに挿せるので、向きごとに、脚から傾斜台（壁、底の隅の斜面、底の板）までの"
             "いちばん狭い所を測った。向きは、スイッチのまん中寄りの端子が来る側で呼ぶ。配線に使えるのは、電気の端子のまわりのすき間：")
@@ -812,7 +895,7 @@ def tipping(rep: Report, p: Params) -> None:
     rep.add()
     rep.add("各キーの中央を、キー面に垂直に押したとする。押す力の向きを机まで延ばした点が支えの内側にあれば、")
     rep.add("どれだけ強く押しても倒れない。外側にあるときは、支えの縁を支点にして倒れ始める力を出した。")
-    rep.add("押す位置がキーの中央からずれると、力の向きが机に届く点もずれる。キャップの縁を押した場合は、下の別の表に書く。")
+    rep.add("押す位置がキーの中央からずれると、力の向きが机に届く点もずれる。キャップの端を押した場合は、下の別の表に書く。")
     rep.add(f"支えは、傾斜台の底の目印（輪の溝）に貼った平らなゴム足 4 枚（直径 {p.pad_d:g} mm、厚み {p.pad_h:g} mm）とした。"
             f"ゴム足の縁は台の縁から {p.pad_edge:g} mm 内側に来る。ゴム足の厚みのぶんケースが浮き、"
             "力の向きが机に届く点はそのぶん、キー面が高い側へずれる。")
@@ -844,11 +927,13 @@ def tipping(rep: Report, p: Params) -> None:
         rep.add(note)
     rep.add()
 
-    rep.add("押す位置を変えたとき（いちばん倒れやすいキー。ゴム足は上と同じ）。「キャップの縁」は、キャップの四隅と"
-            "各辺のまん中のうち、いちばん倒れやすい所を押した場合：")
+    rep.add("押す位置を変えたとき（いちばん倒れやすいキー。ゴム足は上と同じ）。「平らな上面の縁」は、印刷用のキャップの"
+            "平らな上面の、各辺のまん中と丸めた四隅のうち、いちばん倒れやすい所を押した場合。指で押せる範囲の端に当たる。"
+            "「キャップを囲む長方形の角」は、キャップの外形を囲む長方形の四隅と各辺のまん中で見積もった下限。"
+            "キャップは上へ向かって絞ってあり、角も丸いので、この角そのものは押せない：")
     rep.add()
     rows = []
-    for label, spot in (("各キーの中央", "centre"), ("キャップの縁", "rim")):
+    for label, spot in (("各キーの中央", "centre"), ("平らな上面の縁", "top"), ("キャップを囲む長方形の角（下限）", "box")):
         cells = []
         for side in assembly.SIDES:
             st = analysis.stability(p, side, spot=spot)
@@ -883,16 +968,18 @@ def tipping(rep: Report, p: Params) -> None:
         seen.append((t, sl))
         q = p.with_(tilt=t, slope=sl)
         lay = assembly.layout(q, "left")
-        st, rim = analysis.stability(q, "left"), analysis.stability(q, "left", spot="rim")
+        st, top_edge, box = (analysis.stability(q, "left", spot=spot) for spot in analysis.SPOTS)
         leans = shell.wall_leans(q, lay)
         bb = assembly.base_world(q, "left").bounding_box()
         top = max(shell.world_point(q, lay, (lay.u_in, v, q.top))[2] for v in (lay.v_front, lay.v_back))
         rows.append([f"左右 {t:g}°、前後 {sl:g}°" + ("（この一式）" if (t, sl) == (p.tilt, p.slope) else ""),
                      f"{shell.steepest(q):.1f}°", f"{leans['cheek']:.0f}°", f"{leans['back']:.0f}°",
                      f"{bb[3] - bb[0]:.0f} × {bb[4] - bb[1]:.0f}", f"{top:.0f}",
-                     _force(min(st.tip_force.values())), _force(min(rim.tip_force.values()))])
+                     _force(min(st.tip_force.values())), _force(min(top_edge.tip_force.values())),
+                     _force(min(box.tip_force.values()))])
     rep.table(["姿勢", "合わせた傾き", "内側の壁の寝かせ", "奥の壁の寝かせ", "足もとの幅 × 奥行き（mm）",
-               "上面のいちばん高い角（mm）", "倒れ始める力（各キーの中央）", "倒れ始める力（キャップの縁）"], rows)
+               "上面のいちばん高い角（mm）", "倒れ始める力（各キーの中央）", "倒れ始める力（平らな上面の縁）",
+               "倒れ始める力（キャップを囲む長方形の角。下限）"], rows)
 
 
 def main() -> None:
@@ -917,7 +1004,7 @@ def main() -> None:
     assembled(rep, p, stl, files)
     holes(rep, p, stl)
     posture(rep, p, meshes)
-    clearances(rep, p)
+    clearances(rep, p, stl, files)
     insertion(rep, p)
     printing(rep, meshes, files)
     tipping(rep, p)

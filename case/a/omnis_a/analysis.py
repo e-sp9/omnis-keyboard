@@ -31,7 +31,7 @@ def centroid(manifold) -> tuple[np.ndarray, float]:
 # ---- 倒れにくさ -----------------------------------------------------------------
 
 SUPPORTS = ("pads", "centres", "foot")
-SPOTS = ("centre", "rim")
+SPOTS = ("centre", "top", "box")
 
 
 def hull(points: np.ndarray) -> np.ndarray:
@@ -84,8 +84,11 @@ def stability(p: Params, side: str, support: str = "pads", spot: str = "centre")
     外側なら、支えの縁を支点にして、力のモーメントが自重のモーメントを超えると倒れ始める。
     ゴム足を貼るとケースがその厚みだけ浮き、力の向きが机に届く点はさらに内側へずれる。
 
-    押す位置は spot で選ぶ。"centre" は各キーの中央。"rim" はキャップの縁（四隅と、各辺のまん中）
-    のうち、いちばん倒れやすい所。
+    押す位置は spot で選ぶ。どれも、候補のうち、いちばん倒れやすい所を取る。
+    "centre"  各キーの中央
+    "top"     印刷用のキャップの平らな上面の縁（各辺のまん中と、丸めた四隅）。指で押せる範囲の端
+    "box"     キャップを囲む長方形の四隅と各辺のまん中。丸みのあるキャップでは押せない角まで含む、
+              下限の見積もり
     """
     if spot not in SPOTS:
         raise ValueError(spot)
@@ -111,8 +114,13 @@ def stability(p: Params, side: str, support: str = "pads", spot: str = "centre")
         _z0, z1 = parts.cap_heights(p, key)
         if spot == "centre":
             offsets = [(0.0, 0.0)]
-        else:
+        elif spot == "box":
             offsets = [(i * key.cap_w / 2.0, j * key.cap_d / 2.0) for i in (-1, 0, 1) for j in (-1, 0, 1) if (i, j) != (0, 0)]
+        else:
+            half_w, half_d, r = parts.cap_flat(p, key)
+            corner = r - r / math.sqrt(2.0)                  # 丸めた角が、とがった角から引っ込む量
+            offsets = [(i * half_w, 0.0) for i in (-1, 1)] + [(0.0, j * half_d) for j in (-1, 1)]
+            offsets += [(i * (half_w - corner), j * (half_d - corner)) for i in (-1, 1) for j in (-1, 1)]
         best, beyond = math.inf, 0.0
         for du, dv in offsets:
             du, dv, _ = geom.rot_z(key.rot) @ np.array([du, dv, 0.0])

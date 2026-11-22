@@ -16,8 +16,12 @@
 形は STL を読むのではなく、build.py と同じ関数から直接作る。寸法は既定値ではなく、STL と同じ
 場所の build.json（build.py が書く、作ったときの寸法とコードの版の記録）から読む。古い形式の
 記録や、別の版のコードで作った STL は、同じ形を作り直せないので、描く前にそう知らせて止まる。
+STL の中身が記録のハッシュと合わないとき（build.json を残して STL だけ差し替えた一式）も、
+記録の寸法と同じ形か分からないので、描く前に止まる。
+
 stl/ の一式は preview/ に、それ以外は使い捨ての置き場（環境変数 OMNIS_SCRATCH、なければ
-~/.cache/omnis-case-a）に出す。描画用の一時ファイルも使い捨ての置き場に書く。
+~/.cache/omnis-case-a）に出す。描画用の一時ファイルは、使い捨ての置き場の下に実行のたびに
+作る専用のフォルダー（render-＊）に書き、終わるときにそのフォルダーだけを消す。
 
 キーキャップは、参考画像に近い丸みのある形で描く（parts.keycap_look）。印刷用のキャップ
 （stl/keycap_*.stl）の形とは違い、描くだけのもの。部品の図（parts）だけは印刷用の形で描く。
@@ -26,9 +30,11 @@ stl/ の一式は preview/ に、それ以外は使い捨ての置き場（環�
 from __future__ import annotations
 
 import argparse
+import atexit
 import math
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -43,7 +49,22 @@ from omnis_a import assembly, geom, manifest, parts, shell, workdir  # noqa: E40
 from omnis_a.params import MODEL, Params  # noqa: E402
 
 PREVIEW = HERE / "preview"
-CACHE = workdir.scratch("render")
+_TEMP: Path | None = None
+
+
+def _temp() -> Path:
+    """この実行だけが使う一時フォルダー（描画用の PLY を書く）。
+
+    使い捨ての置き場の下に、ほかと重ならない名前で作る。終わるときに消すのは、このフォルダー
+    だけ。画像の出し先（--out）や、前からあるファイルを巻き込まない。
+    """
+    global _TEMP
+    if _TEMP is None:
+        root = workdir.scratch()
+        root.mkdir(parents=True, exist_ok=True)
+        _TEMP = Path(tempfile.mkdtemp(prefix="render-", dir=root))
+        atexit.register(shutil.rmtree, _TEMP, ignore_errors=True)
+    return _TEMP
 REFERENCE = HERE / "reference" / "chamfer-inner-wheel.jpg"
 
 # 参考画像に合わせたカメラ。参考画像のケースの角とキーの位置に、この形の同じ点が重なるように
@@ -108,8 +129,7 @@ def _shape(name: str, material: str, manifold, smooth: bool) -> dict:
         mesh = manifold.to_mesh()
         tm = trimesh.Trimesh(vertices=np.asarray(mesh.vert_properties)[:, :3],
                              faces=np.asarray(mesh.tri_verts), process=False)
-        CACHE.mkdir(parents=True, exist_ok=True)
-        path = CACHE / f"{name}.ply"
+        path = _temp() / f"{name}.ply"
         tm.export(path)
         shape = {"type": "ply", "filename": str(path), "face_normals": not smooth}
     shape["bsdf"] = {"type": "ref", "id": f"mat_{material}"}
@@ -248,6 +268,27 @@ def _box(items, prefix: str = "", groups: tuple | None = None) -> tuple[np.ndarr
     return np.min([b[:3] for b in boxes], axis=0), np.max([b[3:] for b in boxes], axis=0)
 
 
+def _fit(size: tuple[int, int], width: float, centre_z: float, reach, top, bottom) -> tuple[tuple[int, int], float, float]:
+    """平行投影の枠を、描く形と寸法線が収まるように決める。画像の大きさ、横幅（mm）、枠のまん中の高さを返す。
+
+    size、width、centre_z は既定の枠（画素、横幅 mm、枠のまん中の高さ mm）。reach(scale) は、
+    枠のまん中から左右に要る幅（mm）。top(scale) と bottom(scale) は、要る上端と下端の高さ（mm）。
+    scale は 1 mm あたりの画素数。数字の大きさは画素で決まっているので、要る幅は縮尺で変わる。
+    既定の枠に収まるなら、既定のまま返す。収まらなければ、縮尺を下げ、枠を上下に広げる。
+    """
+    scale = size[0] / width
+    half = size[1] / 2.0 / scale                      # 既定の枠の、高さの半分（mm）
+    for _ in range(8):
+        need = 2.0 * reach(scale)
+        if need <= width + 1e-9:
+            break
+        width = need
+        scale = size[0] / width
+    z_hi = max(centre_z + half, top(scale))
+    z_lo = min(centre_z - half, bottom(scale))
+    return (size[0], round((z_hi - z_lo) * scale)), width, (z_hi + z_lo) / 2.0
+
+
 def _dimension(draw, a, b, text, font, ink=(40, 40, 40), side: str = "left") -> None:
     """2 点の間に寸法線を引き、数字を書く。縦の線では、side の側に数字を書く。"""
     draw.line([a, b], fill=ink, width=2)
@@ -268,10 +309,19 @@ def _dimension(draw, a, b, text, font, ink=(40, 40, 40), side: str = "left") -> 
 def front(p: Params, spp: int | None = None) -> Image.Image:
     """真正面（平行投影）。幅と高さを書き込む。"""
     gap = 32.0
-    size, width = (1500, 520), 290.0
-    centre_z = 30.0
     wall = geom.box(-2000.0, 2000.0, 400.0, 410.0, 0.0, 2000.0)     # 背景の壁
     items = pair(p, gap)
+    # 寸法線は、描いた形そのものの外寸に合わせる。高さは、描いたキーキャップの上端（左）と、
+    # ケースの上端（右）。キーキャップはプレビュー用の形なので、印刷用のキャップより少し高い。
+    lo, hi = _box(items, "left_", CASE)
+    _lo_all, hi_all = _box(items)
+    _lo_r, hi_r = _box(items, "right_", CASE)
+    font = _font(26)
+    # 枠は、形と寸法線、数字が収まるように決める（背の高い姿勢では、既定の枠より広げる）
+    pad = 24.0 + max(font.getlength(f"{v:.1f} mm") for v in (hi_all[2], hi_r[2]))     # 寸法線から数字の端と余白まで（画素）
+    size, width, centre_z = _fit((1500, 520), 290.0, 30.0,
+                                 reach=lambda s: max(-lo[0], hi_r[0]) + 7.0 + pad / s,
+                                 top=lambda s: hi[2] + 22.0 + 30.0 / s, bottom=lambda s: -7.0 - 42.0 / s)
     img = shoot(items + [("backdrop", "desk", wall)], (0.0, -900.0, centre_z),
                 (0.0, 0.0, centre_z), size, spp or 256, ortho_width=width)
     scale = size[0] / width
@@ -279,12 +329,7 @@ def front(p: Params, spp: int | None = None) -> Image.Image:
     def px(x: float, z: float) -> tuple[float, float]:
         return (size[0] / 2 + x * scale, size[1] / 2 - (z - centre_z) * scale)
 
-    # 寸法線は、描いた形そのものの外寸に合わせる。高さは、描いたキーキャップの上端（左）と、
-    # ケースの上端（右）。キーキャップはプレビュー用の形なので、印刷用のキャップより少し高い。
-    lo, hi = _box(items, "left_", CASE)
-    _lo_all, hi_all = _box(items)
-    _lo_r, hi_r = _box(items, "right_", CASE)
-    draw, font = ImageDraw.Draw(img), _font(26)
+    draw = ImageDraw.Draw(img)
     _dimension(draw, px(lo[0], -7), px(hi[0], -7), f"{hi[0] - lo[0]:.1f} mm", font)
     _dimension(draw, px(lo[0] - 7, 0), px(lo[0] - 7, hi_all[2]), f"{hi_all[2]:.1f} mm", font)
     _dimension(draw, px(hi_r[0] + 7, 0), px(hi_r[0] + 7, hi_r[2]), f"{hi_r[2]:.1f} mm", font, side="right")
@@ -295,13 +340,17 @@ def front(p: Params, spp: int | None = None) -> Image.Image:
 
 def side(p: Params, spp: int | None = None) -> Image.Image:
     """左のケースを、内側の真横から見た図（平行投影）。奥行きと高さを書き込む。"""
-    size, width = (1500, 640), 190.0
-    centre_z = 28.0
     half = assembly.half(p, "left", look=True)
     items = [(f"left_{group}", GROUP_MATERIAL[group], m) for group, m in half.items()]
     lo, hi = _box(items, "left_", CASE)          # 寸法線は、描いた形そのものの外寸に合わせる
     _lo_all, hi_all = _box(items)
     mid_y = (lo[1] + hi[1]) / 2.0
+    font = _font(26)
+    # 枠は、形と寸法線、数字が収まるように決める（背の高い姿勢では、既定の枠より上へ広げる）
+    pad = 24.0 + max(font.getlength(f"{v:.1f} mm") for v in (hi_all[2], hi[2]))       # 寸法線から数字の端と余白まで（画素）
+    size, width, centre_z = _fit((1500, 640), 190.0, 28.0,
+                                 reach=lambda s: (hi[1] - lo[1]) / 2.0 + 7.0 + pad / s,
+                                 top=lambda s: hi_all[2] + 28.0 / s, bottom=lambda s: -7.0 - 42.0 / s)
     backdrop = ("backdrop", "desk", geom.box(-410.0, -400.0, -2000.0, 2000.0, 0.0, 2000.0))
     img = shoot(items + [backdrop], (900.0, mid_y, centre_z), (0.0, mid_y, centre_z), size, spp or 256,
                 ortho_width=width)
@@ -310,7 +359,7 @@ def side(p: Params, spp: int | None = None) -> Image.Image:
     def px(y: float, z: float) -> tuple[float, float]:           # 奥（+y）が画面の右
         return (size[0] / 2 + (y - mid_y) * scale, size[1] / 2 - (z - centre_z) * scale)
 
-    draw, font = ImageDraw.Draw(img), _font(26)
+    draw = ImageDraw.Draw(img)
     _dimension(draw, px(lo[1], -7), px(hi[1], -7), f"{hi[1] - lo[1]:.1f} mm", font)
     _dimension(draw, px(lo[1] - 7, 0), px(lo[1] - 7, hi_all[2]), f"{hi_all[2]:.1f} mm", font)
     _dimension(draw, px(hi[1] + 7, 0), px(hi[1] + 7, hi[2]), f"{hi[2]:.1f} mm", font, side="right")
@@ -416,8 +465,9 @@ def main() -> None:
     if unknown:
         ap.error(f"知らない図です: {' '.join(unknown)}")
     stl = args.stl.expanduser().resolve()
-    # 古い形式の記録や、別の版のコードで作った一式なら、ここで知らせて止まる（別の姿勢で描かない）
-    _p_plate, p, _files = manifest.load_set(stl, args.tilt, args.slope)
+    # 古い形式の記録、別の版のコードで作った一式、STL の中身が記録と合わない一式なら、ここで知らせて止まる
+    # （記録の寸法のまま、別の形を描かない）
+    _p_plate, p, _files = manifest.load_intact_set(stl, args.tilt, args.slope)
     if args.out is None:
         tag = manifest.posture_tag(args.tilt, args.slope)
         args.out = PREVIEW if (stl == HERE / "stl" and not tag) else workdir.scratch("preview", stl.name + tag)
@@ -445,7 +495,6 @@ def main() -> None:
             save(layout(p, args.spp), "layout.jpg")
         elif name == "parts":
             save(parts_sheet(p, args.spp), "parts.jpg")
-    shutil.rmtree(CACHE, ignore_errors=True)
 
 
 if __name__ == "__main__":

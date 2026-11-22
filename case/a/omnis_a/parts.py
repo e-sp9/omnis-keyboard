@@ -34,21 +34,36 @@ def cap_heights(p: Params, key: Key) -> tuple[float, float]:
 
     キャップは軸の先端に座るので、先端が低いスイッチでは、キャップもそのぶん低くなる。
     下端は、図面の公差の端（ストロークが長く、ハウジングが高く、軸の先端が低い）のスイッチを
-    押し切っても cap_margin が残る高さにする。文字キーのキャップはハウジングをまたぐので、
+    押し切っても cap_margin 以上が残る高さにする。文字キーのキャップはハウジングをまたぐので、
     つばの上面が相手。音声入力キーの小さいキャップはまたげないので、ハウジングの上端が相手になる。
+    どのキャップも、下端と上面は、軸の先端から layer の整数倍の高さにある（params.py の説明）。
     """
     if key.kind == "voice":
-        skirt = p.sw_top + p.sw_height_tol + p.travel_max + p.sw_stem_tol + p.cap_margin
-        return skirt, skirt + p.voice_cap_h
+        # 要る高さより上で、軸の先端から layer の整数倍になる高さ（印刷すると、下端と十字の穴の底の
+        # 間は layer の整数倍にしかならない。足りない側へ丸められないよう、切り上げておく）
+        need = p.sw_top + p.sw_height_tol + p.travel_max + p.sw_stem_tol + p.cap_margin
+        skirt = p.sw_stem + math.ceil((need - p.sw_stem) / p.layer - 1e-9) * p.layer
+        return round(skirt, 6), round(skirt + p.voice_cap_h, 6)
     return p.cap_skirt, p.cap_top
+
+
+CAP_EDGE = 0.5        # キャップの上面の縁を落とす量
+VOICE_TAPER = 0.6     # 音声入力キーの薄いキャップの絞り（斜面が寝すぎない量にする）
+
+
+def cap_flat(p: Params, key: Key) -> tuple[float, float, float]:
+    """印刷用のキャップの平らな上面。幅の半分、奥行きの半分、角の丸みの半径。"""
+    taper = p.cap_taper if key.kind != "voice" else VOICE_TAPER
+    half_w, half_d = key.cap_w / 2.0 - (taper + CAP_EDGE), key.cap_d / 2.0 - (taper + CAP_EDGE)
+    return half_w, half_d, min(max(0.3, p.cap_round - CAP_EDGE), half_w - 0.05, half_d - 0.05)
 
 
 def keycap(p: Params, key: Key) -> Manifold:
     """キーキャップ。原点はスイッチが載る面の、キーの中心。上が +z。"""
     w, d = key.cap_w, key.cap_d
     z0, z1 = cap_heights(p, key)
-    taper = p.cap_taper if key.kind != "voice" else 0.6   # 薄いキャップは、斜面が寝すぎない量にする
-    edge = 0.5
+    taper = p.cap_taper if key.kind != "voice" else VOICE_TAPER
+    edge = CAP_EDGE
     r = p.cap_round
     band = min(1.0, (z1 - z0) / 3.0)     # 下端のまっすぐな部分
     outer = _stack([
@@ -83,7 +98,7 @@ def keycap_printable(p: Params, key: Key) -> Manifold:
 LOOK = {
     "alpha": dict(top=12.2, taper=2.2, fillet=0.9, corner=1.7, dish=0.35),
     "thumb": dict(top=12.2, taper=2.2, fillet=0.9, corner=1.7, dish=0.3),
-    "voice": dict(top=9.15, taper=1.2, fillet=0.6, corner=1.4, dish=0.0),
+    "voice": dict(top=9.2, taper=1.2, fillet=0.6, corner=1.4, dish=0.0),
 }
 
 
@@ -253,17 +268,14 @@ def ball_in_place(p: Params, lay: Layout, segments: int = 128) -> Manifold:
 
 # ---- スイッチ穴のふち、試し刷り ---------------------------------------------------
 
-MIN_RELIEF = 0.6    # 爪の逃げの高さがこれより低くなる所には、逃げを彫らない
-
-
 def ledge(p: Params, key: Key) -> float:
     """そのキーの穴のふちで、爪を受ける板の厚み。
 
-    ふつうは clip_t。板が薄い所（スイッチを沈めた音声入力キー）は逃げを彫らず、板の下面が
-    そのまま爪を受ける。
+    ふつうは clip_t。スイッチを沈めた音声入力キーは、スイッチが載る面からプレートの下面までの
+    残りが clip_t と同じか薄いとき、逃げを彫らずに、板の下面がそのまま爪を受ける。残りのほうが
+    厚いとき（clip_t を薄くしたとき）は、その差だけ下面から逃げを彫る。スイッチが載る面は動かさない。
     """
-    full = p.plate_t - key.sink
-    return full if full - p.clip_t < MIN_RELIEF else p.clip_t
+    return min(p.plate_t - key.sink, p.clip_t)
 
 
 def clip_relief(p: Params, key: Key, z_low: float, z_ledge: float, open_sides: tuple = (),
