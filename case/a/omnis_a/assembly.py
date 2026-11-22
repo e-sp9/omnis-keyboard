@@ -1,0 +1,79 @@
+"""組み立てた状態。左右とも机の座標で、内側が +x の向きに作る（右手は使う側で反転する）。"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+
+from manifold3d import Manifold
+
+from . import layout as lay_mod, parts, plate as plate_mod, shell
+from .layout import Layout
+from .params import Params
+
+SIDES = ("left", "right")
+
+
+@lru_cache(maxsize=16)
+def layout(p: Params, side: str) -> Layout:
+    return lay_mod.make_layout(p, side)
+
+
+@lru_cache(maxsize=16)
+def plate_deck(p: Params, side: str) -> Manifold:
+    return plate_mod.plate(p, layout(p, side))
+
+
+@lru_cache(maxsize=16)
+def base_world(p: Params, side: str) -> Manifold:
+    return shell.base(p, layout(p, side))
+
+
+def half(p: Params, side: str, press: float = 0.0, knurl: bool = True) -> dict[str, Manifold]:
+    """片手ぶんの部品（机の座標、内側が +x）。"""
+    lay = layout(p, side)
+
+    def world(m: Manifold) -> Manifold:
+        return shell.to_world(p, lay, m)
+
+    out: dict[str, Manifold] = {"plate": world(plate_deck(p, side))}
+    base = base_world(p, side)
+    upper, lower = base.split_by_plane((0.0, 0.0, 1.0), p.foot_h)
+    out["base"] = upper
+    out["foot"] = lower
+
+    caps = voice = sw_up = sw_low = stems = None
+    sw_u, sw_l = parts.switch(p)
+    stem = parts.stem(p, press)
+    for key in lay.keys:
+        cap = parts.place_on_key(p, key, parts.keycap(p, key), press)
+        if key.kind == "voice":
+            voice = cap
+        else:
+            caps = cap if caps is None else caps + cap
+        a, b = parts.place_on_key(p, key, sw_u), parts.place_on_key(p, key, sw_l)
+        c = parts.place_on_key(p, key, stem)
+        sw_up = a if sw_up is None else sw_up + a
+        sw_low = b if sw_low is None else sw_low + b
+        stems = c if stems is None else stems + c
+    out["caps"] = world(caps)
+    if voice is not None:
+        out["voice_cap"] = world(voice)
+    # ハウジングは軸の通り道を抜いておく（軸とキーキャップの筒はそこを動く）
+    bore = None
+    for key in lay.keys:
+        hole = parts.place_on_key(p, key, parts.stem(p).translate((0, 0, -3.0)))
+        bore = hole if bore is None else bore + hole
+    out["switch_upper"] = world(sw_up - bore)
+    out["switch_lower"] = world(sw_low)
+    out["stems"] = world(stems)
+    if lay.wheel is not None:
+        out["wheel"] = world(parts.wheel_in_place(p, lay, knurl))
+        out["axle"] = world(parts.axle_in_place(p, lay))
+    else:
+        out["ball"] = world(parts.ball_in_place(p, lay))
+    return out
+
+
+def footprint_x(p: Params, side: str) -> tuple[float, float]:
+    bb = base_world(p, side).bounding_box()
+    return bb[0], bb[3]
